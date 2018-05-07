@@ -1,0 +1,101 @@
+diff --git a/solr/core/src/java/org/apache/solr/handler/sql/SolrTable.java b/solr/core/src/java/org/apache/solr/handler/sql/SolrTable.java
+index c0b35cfd10..d13dbbe062 100644
+--- a/solr/core/src/java/org/apache/solr/handler/sql/SolrTable.java
++++ b/solr/core/src/java/org/apache/solr/handler/sql/SolrTable.java
+@@ -49,6 +49,7 @@ import org.apache.solr.client.solrj.io.stream.*;
+ import org.apache.solr.client.solrj.io.stream.expr.StreamExpressionParser;
+ import org.apache.solr.client.solrj.io.stream.expr.StreamFactory;
+ import org.apache.solr.client.solrj.io.stream.metrics.*;
++import org.apache.solr.common.SolrException;
+ import org.apache.solr.common.params.CommonParams;
+ import org.apache.solr.common.params.ModifiableSolrParams;
+ import org.apache.solr.handler.StreamHandler;
+@@ -556,6 +557,10 @@ class SolrTable extends AbstractQueryableTable implements TranslatableTable {
+     for(Map.Entry<String,Class> field : fields) {
+       String fieldName = field.getKey();
+       if(buckets.contains(fieldName)) {
++        if (i == buckets.size()) {
++          throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "" +
++              "'" + fieldName + "' doesn't qualify for aggregation, probable duplicate");
++        }
+         bucketsArray[i++] = new Bucket(fieldName);
+       }
+     }
+diff --git a/solr/core/src/test/org/apache/solr/handler/TestSQLHandler.java b/solr/core/src/test/org/apache/solr/handler/TestSQLHandler.java
+index 70ebd0aa78..41e7379e99 100644
+--- a/solr/core/src/test/org/apache/solr/handler/TestSQLHandler.java
++++ b/solr/core/src/test/org/apache/solr/handler/TestSQLHandler.java
+@@ -94,6 +94,44 @@ public class TestSQLHandler extends AbstractFullDistribZkTestBase {
+     testParallelBasicGrouping();
+     testParallelSelectDistinct();
+     testParallelTimeSeriesGrouping();
++    testErrorHandlingDuplicateFieldForAggregate();
++  }
++
++  private void testErrorHandlingDuplicateFieldForAggregate() throws Exception {
++    try {
++      CloudJettyRunner jetty = this.cloudJettys.get(0);
++
++      del("*:*");
++      commit();
++
++      indexDoc(sdoc("id", "1", "text", "XXXX XXXX", "str_s", "a", "field_i", "7"));
++      indexDoc(sdoc("id", "2", "text", "XXXX XXXX", "str_s", "a", "field_i", "8"));
++      commit();
++
++      System.out.println("############# testErrorHandlingDuplicateFieldForAggregate #1 ############");
++
++      SolrParams sParams = mapParams(CommonParams.QT, "/sql",
++          "stmt", "select str_s from collection1 group by str_s");
++
++      SolrStream solrStream = new SolrStream(jetty.url, sParams);
++      List<Tuple> tuples = getTuples(solrStream);
++      assert(tuples.size() == 1);
++
++      System.out.println("############# testErrorHandlingDuplicateFieldForAggregate #2 ############");
++
++      sParams = mapParams(CommonParams.QT, "/sql",
++          "stmt", "select str_s, str_s from collection1 group by str_s");
++
++      solrStream = new SolrStream(jetty.url, sParams);
++      try {
++        getTuples(solrStream);
++        fail();
++      } catch (Exception e) {
++        assertTrue(e.getMessage().contains("doesn't qualify for aggregation, probable duplicate"));
++      }
++    } finally {
++      delete();
++    }
+   }
+ 
+   private void testBasicSelect() throws Exception {
+@@ -2516,17 +2554,20 @@ public class TestSQLHandler extends AbstractFullDistribZkTestBase {
+   }
+ 
+   protected List<Tuple> getTuples(TupleStream tupleStream) throws IOException {
+-    tupleStream.open();
+     List<Tuple> tuples = new ArrayList<>();
+-    for(;;) {
+-      Tuple t = tupleStream.read();
+-      if(t.EOF) {
+-        break;
+-      } else {
+-        tuples.add(t);
++    try {
++      tupleStream.open();
++      for (; ; ) {
++        Tuple t = tupleStream.read();
++        if (t.EOF) {
++          break;
++        } else {
++          tuples.add(t);
++        }
+       }
++    } finally {
++      tupleStream.close();
+     }
+-    tupleStream.close();
+     return tuples;
+   }
+ 

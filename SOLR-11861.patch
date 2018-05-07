@@ -1,0 +1,114 @@
+diff --git a/solr/core/src/java/org/apache/solr/cloud/OverseerConfigSetMessageHandler.java b/solr/core/src/java/org/apache/solr/cloud/OverseerConfigSetMessageHandler.java
+index 2f2859f341..5a0a5e046f 100644
+--- a/solr/core/src/java/org/apache/solr/cloud/OverseerConfigSetMessageHandler.java
++++ b/solr/core/src/java/org/apache/solr/cloud/OverseerConfigSetMessageHandler.java
+@@ -45,6 +45,7 @@ import org.noggit.JSONUtil;
+ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
+ 
++import static org.apache.solr.handler.admin.ConfigSetsHandlerApi.DEFAULT_CONFIGSET_NAME;
+ import static org.apache.solr.common.params.CommonParams.NAME;
+ import static org.apache.solr.common.params.ConfigSetParams.ConfigSetAction.CREATE;
+ 
+@@ -210,7 +211,11 @@ public class OverseerConfigSetMessageHandler implements OverseerMessageHandler {
+       operation = operation.substring(CONFIGSETS_ACTION_PREFIX.length());
+       ConfigSetParams.ConfigSetAction action = ConfigSetParams.ConfigSetAction.get(operation);
+       if (action == CREATE) {
+-        return message.getStr(BASE_CONFIGSET);
++        String baseConfigSetName = message.getStr(BASE_CONFIGSET);
++        if (baseConfigSetName == null || baseConfigSetName.length() == 0) {
++          baseConfigSetName = DEFAULT_CONFIGSET_NAME;
++        }
++        return baseConfigSetName;
+       }
+     }
+     return null;
+@@ -285,7 +290,7 @@ public class OverseerConfigSetMessageHandler implements OverseerMessageHandler {
+ 
+     String baseConfigSetName = message.getStr(BASE_CONFIGSET);
+     if (baseConfigSetName == null || baseConfigSetName.length() == 0) {
+-      throw new SolrException(ErrorCode.BAD_REQUEST, "Base ConfigSet name not specified");
++      baseConfigSetName = DEFAULT_CONFIGSET_NAME;
+     }
+ 
+     ZkConfigManager configManager = new ZkConfigManager(zkStateReader.getZkClient());
+diff --git a/solr/core/src/java/org/apache/solr/handler/admin/ConfigSetsHandler.java b/solr/core/src/java/org/apache/solr/handler/admin/ConfigSetsHandler.java
+index 34313d00d8..6cc2ca9ec7 100644
+--- a/solr/core/src/java/org/apache/solr/handler/admin/ConfigSetsHandler.java
++++ b/solr/core/src/java/org/apache/solr/handler/admin/ConfigSetsHandler.java
+@@ -60,6 +60,7 @@ import static org.apache.solr.cloud.OverseerConfigSetMessageHandler.CONFIGSETS_A
+ import static org.apache.solr.cloud.OverseerConfigSetMessageHandler.PROPERTY_PREFIX;
+ import static org.apache.solr.common.params.CommonParams.NAME;
+ import static org.apache.solr.common.params.ConfigSetParams.ConfigSetAction.*;
++import static org.apache.solr.handler.admin.ConfigSetsHandlerApi.DEFAULT_CONFIGSET_NAME;
+ 
+ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
+@@ -258,7 +259,12 @@ public class ConfigSetsHandler extends RequestHandlerBase implements PermissionN
+     CREATE_OP(CREATE) {
+       @Override
+       Map<String, Object> call(SolrQueryRequest req, SolrQueryResponse rsp, ConfigSetsHandler h) throws Exception {
+-        Map<String, Object> props = req.getParams().required().getAll(null, NAME, BASE_CONFIGSET);
++        String baseConfigSetName = req.getParams().get(BASE_CONFIGSET);
++        if (baseConfigSetName == null) {
++          baseConfigSetName = DEFAULT_CONFIGSET_NAME;
++        }
++        Map<String, Object> props = req.getParams().required().getAll(null, NAME);
++        props.put(BASE_CONFIGSET, baseConfigSetName);
+         return copyPropertiesWithPrefix(req.getParams(), props, PROPERTY_PREFIX + ".");
+       }
+     },
+diff --git a/solr/core/src/test/org/apache/solr/cloud/TestConfigSetsAPI.java b/solr/core/src/test/org/apache/solr/cloud/TestConfigSetsAPI.java
+index ddd8fd9b98..60345edf29 100644
+--- a/solr/core/src/test/org/apache/solr/cloud/TestConfigSetsAPI.java
++++ b/solr/core/src/test/org/apache/solr/cloud/TestConfigSetsAPI.java
+@@ -137,9 +137,8 @@ public class TestConfigSetsAPI extends SolrTestCaseJ4 {
+     CreateNoErrorChecking create = new CreateNoErrorChecking();
+     verifyException(solrClient, create, NAME);
+ 
+-    // no base ConfigSet name
++    // set ConfigSet
+     create.setConfigSetName("configSetName");
+-    verifyException(solrClient, create, BASE_CONFIGSET);
+ 
+     // ConfigSet already exists
+     Create alreadyExists = new Create();
+@@ -157,7 +156,7 @@ public class TestConfigSetsAPI extends SolrTestCaseJ4 {
+   @Test
+   public void testCreate() throws Exception {
+     // no old, no new
+-    verifyCreate("baseConfigSet1", "configSet1", null, null);
++    verifyCreate(null, "configSet1", null, null);
+ 
+     // no old, new
+     verifyCreate("baseConfigSet2", "configSet2",
+diff --git a/solr/solrj/src/java/org/apache/solr/client/solrj/request/ConfigSetAdminRequest.java b/solr/solrj/src/java/org/apache/solr/client/solrj/request/ConfigSetAdminRequest.java
+index 6916877715..3db85890c5 100644
+--- a/solr/solrj/src/java/org/apache/solr/client/solrj/request/ConfigSetAdminRequest.java
++++ b/solr/solrj/src/java/org/apache/solr/client/solrj/request/ConfigSetAdminRequest.java
+@@ -135,10 +135,9 @@ public abstract class ConfigSetAdminRequest
+     @Override
+     public SolrParams getParams() {
+       ModifiableSolrParams params = new ModifiableSolrParams(super.getParams());
+-      if (baseConfigSetName == null) {
+-        throw new RuntimeException( "no Base ConfigSet specified!" );
++      if (baseConfigSetName != null) {
++        params.set("baseConfigSet", baseConfigSetName);
+       }
+-      params.set("baseConfigSet", baseConfigSetName);
+       if (properties != null) {
+         for (Map.Entry entry : properties.entrySet()) {
+           params.set(PROPERTY_PREFIX + "." + entry.getKey().toString(),
+diff --git a/solr/solrj/src/test/org/apache/solr/client/solrj/request/TestConfigSetAdminRequest.java b/solr/solrj/src/test/org/apache/solr/client/solrj/request/TestConfigSetAdminRequest.java
+index a3409bdd35..50e4f5d1cc 100644
+--- a/solr/solrj/src/test/org/apache/solr/client/solrj/request/TestConfigSetAdminRequest.java
++++ b/solr/solrj/src/test/org/apache/solr/client/solrj/request/TestConfigSetAdminRequest.java
+@@ -38,8 +38,6 @@ public class TestConfigSetAdminRequest extends SolrTestCaseJ4 {
+     ConfigSetAdminRequest.Create create = new ConfigSetAdminRequest.Create();
+     verifyException(create, "ConfigSet");
+     create.setConfigSetName("name");
+-    verifyException(create, "Base ConfigSet");
+-    create.setBaseConfigSetName("baseConfigSet");
+     create.getParams();
+   }
+ 

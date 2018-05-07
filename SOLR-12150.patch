@@ -1,0 +1,38 @@
+diff --git a/solr/core/src/test/org/apache/solr/cloud/cdcr/CdcrBidirectionalTest.java b/solr/core/src/test/org/apache/solr/cloud/cdcr/CdcrBidirectionalTest.java
+index 4a7fae4164..ef96460dec 100644
+--- a/solr/core/src/test/org/apache/solr/cloud/cdcr/CdcrBidirectionalTest.java
++++ b/solr/core/src/test/org/apache/solr/cloud/cdcr/CdcrBidirectionalTest.java
+@@ -195,9 +195,10 @@ public class CdcrBidirectionalTest extends SolrTestCaseJ4 {
+       cluster2SolrClient.commit();
+ 
+       String atomicQuery = "id:" + atomicUpdateId;
++      String atomicField = "abc";
+       response = cluster2SolrClient.query(new SolrQuery(atomicQuery));
+-      assertEquals("cluster 2 wrong doc", "ABC", response.getResults().get(0).get("abc"));
+-      assertEquals("cluster 1 wrong doc", "ABC", getDocFieldValue(cluster1SolrClient, atomicQuery, "ABC"));
++      assertEquals("cluster 2 wrong doc", "ABC", response.getResults().size() > 0 ? response.getResults().get(0).get(atomicField) : "");
++      assertEquals("cluster 1 wrong doc", "ABC", getDocFieldValue(cluster1SolrClient, atomicQuery, "ABC", atomicField ));
+ 
+ 
+       // logging cdcr clusters queue response
+@@ -218,17 +219,17 @@ public class CdcrBidirectionalTest extends SolrTestCaseJ4 {
+     }
+   }
+ 
+-  private String getDocFieldValue(CloudSolrClient clusterSolrClient, String query, String match) throws Exception {
++  private String getDocFieldValue(CloudSolrClient clusterSolrClient, String query, String match, String field) throws Exception {
+     long start = System.nanoTime();
+     QueryResponse response = null;
+     while (System.nanoTime() - start <= TimeUnit.NANOSECONDS.convert(120, TimeUnit.SECONDS)) {
+       clusterSolrClient.commit();
+       response = clusterSolrClient.query(new SolrQuery(query));
+-      if (match.equals(response.getResults().get(0).get("abc"))) {
++      if (response.getResults().size() > 0 && match.equals(response.getResults().get(0).get(field))) {
+         break;
+       }
+       Thread.sleep(1000);
+     }
+-    return response != null ? (String) response.getResults().get(0).get("abc") : "";
++    return response != null ? response.getResults().size() > 0 ? (String) response.getResults().get(0).get(field) : "" : "";
+   }
+ }

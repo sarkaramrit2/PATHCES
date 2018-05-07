@@ -1,0 +1,2262 @@
+diff --git a/solr/bin/solr b/solr/bin/solr
+index 0ce19cbd4e..100386bd5e 100755
+--- a/solr/bin/solr
++++ b/solr/bin/solr
+@@ -950,6 +950,10 @@ if [[ "$SCRIPT_CMD" == "create" || "$SCRIPT_CMD" == "create_core" || "$SCRIPT_CM
+               FORCE=true
+               shift
+           ;;
++          -cdcr)
++              CDCR="-cdcr"
++              shift
++          ;;
+           -help|-usage)
+               print_usage "$SCRIPT_CMD"
+               exit 0
+@@ -1025,7 +1029,7 @@ if [[ "$SCRIPT_CMD" == "create" || "$SCRIPT_CMD" == "create_core" || "$SCRIPT_CM
+       -shards "$CREATE_NUM_SHARDS" -replicationFactor "$CREATE_REPFACT" \
+       -confname "$CREATE_CONFNAME" -confdir "$CREATE_CONFDIR" \
+       -configsetsDir "$SOLR_TIP/server/solr/configsets" \
+-      $VERBOSE
++      $CDCR $VERBOSE
+     exit $?
+   fi
+ fi
+diff --git a/solr/bin/solr.cmd b/solr/bin/solr.cmd
+index 035a9db5ad..b4aa7c5e1b 100644
+--- a/solr/bin/solr.cmd
++++ b/solr/bin/solr.cmd
+@@ -964,7 +964,7 @@ IF "%SCRIPT_CMD%"=="stop" (
+               IF "%%j"=="%SOLR_JETTY_HOST%:!SOME_SOLR_PORT!" (
+                 set found_it=1
+                 @echo Stopping Solr process %%k running on port !SOME_SOLR_PORT!
+-                IF "%STOP_PORT%"=="" set /A STOP_PORT=!SOME_SOLR_PORT! - 1000
++                IF "%STOP_PORT%"=="" set /A STOP_PORT=!SOME_SOLR_PORT! - 1000
+                 "%JAVA%" %SOLR_SSL_OPTS% -Djetty.home="%SOLR_SERVER_DIR%" -jar "%SOLR_SERVER_DIR%\start.jar" STOP.PORT=!STOP_PORT! STOP.KEY=%STOP_KEY% --stop
+                 del "%SOLR_TIP%"\bin\solr-!SOME_SOLR_PORT!.port
+                 timeout /T 5
+@@ -994,7 +994,7 @@ IF "%SCRIPT_CMD%"=="stop" (
+         IF "%%M"=="%SOLR_JETTY_HOST%:%SOLR_PORT%" (
+           set found_it=1
+           @echo Stopping Solr process %%N running on port %SOLR_PORT%
+-          IF "%STOP_PORT%"=="" set /A STOP_PORT=%SOLR_PORT% - 1000
++          IF "%STOP_PORT%"=="" set /A STOP_PORT=%SOLR_PORT% - 1000
+           "%JAVA%" %SOLR_SSL_OPTS% -Djetty.home="%SOLR_SERVER_DIR%" -jar "%SOLR_SERVER_DIR%\start.jar" "%SOLR_JETTY_CONFIG%" STOP.PORT=!STOP_PORT! STOP.KEY=%STOP_KEY% --stop
+           del "%SOLR_TIP%"\bin\solr-%SOLR_PORT%.port
+           timeout /T 5
+@@ -1387,6 +1387,7 @@ IF "%1"=="-rf" goto set_create_rf
+ IF "%1"=="-replicationFactor" goto set_create_rf
+ IF "%1"=="-p" goto set_create_port
+ IF "%1"=="-port" goto set_create_port
++IF "%1"=="-cdcr" goto set_cdcr
+ IF "%1"=="-help" goto usage
+ IF "%1"=="-usage" goto usage
+ IF "%1"=="/?" goto usage
+@@ -1434,6 +1435,11 @@ SHIFT
+ SHIFT
+ goto parse_create_args
+ 
++:set_cdcr
++set CREATE_CDCR="-cdcr"
++SHIFT
++goto parse_create_args
++
+ :run_create
+ IF "!CREATE_NAME!"=="" (
+   set "SCRIPT_ERROR=Name (-c) is a required parameter for %SCRIPT_CMD%"
+@@ -1481,7 +1487,7 @@ if "%SCRIPT_CMD%"=="create_core" (
+     -classpath "%DEFAULT_SERVER_DIR%\solr-webapp\webapp\WEB-INF\lib\*;%DEFAULT_SERVER_DIR%\lib\ext\*" ^
+     org.apache.solr.util.SolrCLI create -name !CREATE_NAME! -shards !CREATE_NUM_SHARDS! -replicationFactor !CREATE_REPFACT! ^
+     -confname !CREATE_CONFNAME! -confdir !CREATE_CONFDIR! -configsetsDir "%SOLR_TIP%\server\solr\configsets" ^
+-    -solrUrl !SOLR_URL_SCHEME!://%SOLR_TOOL_HOST%:!CREATE_PORT!/solr %CREATE_VERBOSE%
++    -solrUrl !SOLR_URL_SCHEME!://%SOLR_TOOL_HOST%:!CREATE_PORT!/solr %CREATE_CDCR% %CREATE_VERBOSE%
+ )
+ 
+ goto done
+diff --git a/solr/core/src/java/org/apache/solr/cloud/api/collections/CreateCollectionCmd.java b/solr/core/src/java/org/apache/solr/cloud/api/collections/CreateCollectionCmd.java
+index d5ceb6a400..55c13088a7 100644
+--- a/solr/core/src/java/org/apache/solr/cloud/api/collections/CreateCollectionCmd.java
++++ b/solr/core/src/java/org/apache/solr/cloud/api/collections/CreateCollectionCmd.java
+@@ -44,6 +44,7 @@ import org.apache.solr.cloud.ZkController;
+ import org.apache.solr.cloud.overseer.ClusterStateMutator;
+ import org.apache.solr.common.SolrException;
+ import org.apache.solr.common.SolrException.ErrorCode;
++import org.apache.solr.common.cloud.CdcrConfigState;
+ import org.apache.solr.common.cloud.ClusterState;
+ import org.apache.solr.common.cloud.DocRouter;
+ import org.apache.solr.common.cloud.ImplicitDocRouter;
+@@ -58,9 +59,11 @@ import org.apache.solr.common.params.CommonAdminParams;
+ import org.apache.solr.common.params.CoreAdminParams;
+ import org.apache.solr.common.params.ModifiableSolrParams;
+ import org.apache.solr.common.util.NamedList;
++import org.apache.solr.common.util.Pair;
+ import org.apache.solr.common.util.SimpleOrderedMap;
+ import org.apache.solr.common.util.TimeSource;
+ import org.apache.solr.common.util.Utils;
++import org.apache.solr.handler.CdcrRequestHandler;
+ import org.apache.solr.handler.admin.ConfigSetsHandlerApi;
+ import org.apache.solr.handler.component.ShardHandler;
+ import org.apache.solr.handler.component.ShardRequest;
+@@ -186,6 +189,19 @@ public class CreateCollectionCmd implements OverseerCollectionMessageHandler.Cmd
+           Overseer.getStateUpdateQueue(zkStateReader.getZkClient()).offer(Utils.toJSON(props));
+         }
+ 
++        // create cdcr.json for collection if cdcr parameters are passed.
++
++        if (message.get(CdcrRequestHandler.NAME) != null && Boolean.parseBoolean(message.get(CdcrRequestHandler.NAME).toString())) {
++          List<Pair> cdcrProps = new ArrayList<>();
++          for (String cdcrParam : message.keySet()) {
++            if (cdcrParam.startsWith(ZkStateReader.CDCR_PREFIX)) {
++              cdcrProps.add(new Pair(cdcrParam.substring(ZkStateReader.CDCR_PREFIX.length()), message.get(cdcrParam)));
++            }
++          }
++          CdcrConfigState cp = new CdcrConfigState(zkStateReader.getZkClient());
++          cp.setCdcrConfig(collectionName, cdcrProps);
++        }
++
+         // Need to create new params for each request
+         ModifiableSolrParams params = new ModifiableSolrParams();
+         params.set(CoreAdminParams.ACTION, CoreAdminParams.CoreAdminAction.CREATE.toString());
+diff --git a/solr/core/src/java/org/apache/solr/cloud/api/collections/OverseerCollectionMessageHandler.java b/solr/core/src/java/org/apache/solr/cloud/api/collections/OverseerCollectionMessageHandler.java
+index 9529ee1ce1..20197eb531 100644
+--- a/solr/core/src/java/org/apache/solr/cloud/api/collections/OverseerCollectionMessageHandler.java
++++ b/solr/core/src/java/org/apache/solr/cloud/api/collections/OverseerCollectionMessageHandler.java
+@@ -18,11 +18,13 @@ package org.apache.solr.cloud.api.collections;
+ 
+ import java.io.IOException;
+ import java.lang.invoke.MethodHandles;
++import java.util.ArrayList;
+ import java.util.Arrays;
+ import java.util.Collection;
+ import java.util.Collections;
+ import java.util.HashMap;
+ import java.util.Iterator;
++import java.util.LinkedHashMap;
+ import java.util.List;
+ import java.util.Map;
+ import java.util.Random;
+@@ -57,6 +59,7 @@ import org.apache.solr.cloud.overseer.OverseerAction;
+ import org.apache.solr.common.SolrCloseable;
+ import org.apache.solr.common.SolrException;
+ import org.apache.solr.common.SolrException.ErrorCode;
++import org.apache.solr.common.cloud.CdcrConfigState;
+ import org.apache.solr.common.cloud.ClusterState;
+ import org.apache.solr.common.cloud.DocCollection;
+ import org.apache.solr.common.cloud.DocRouter;
+@@ -74,11 +77,14 @@ import org.apache.solr.common.params.CoreAdminParams.CoreAdminAction;
+ import org.apache.solr.common.params.ModifiableSolrParams;
+ import org.apache.solr.common.util.ExecutorUtil;
+ import org.apache.solr.common.util.NamedList;
++import org.apache.solr.common.util.Pair;
+ import org.apache.solr.common.util.SimpleOrderedMap;
+ import org.apache.solr.common.util.StrUtils;
+ import org.apache.solr.common.util.SuppressForbidden;
+ import org.apache.solr.common.util.TimeSource;
+ import org.apache.solr.common.util.Utils;
++import org.apache.solr.handler.CdcrParams;
++import org.apache.solr.handler.CdcrRequestHandler;
+ import org.apache.solr.handler.component.ShardHandler;
+ import org.apache.solr.handler.component.ShardHandlerFactory;
+ import org.apache.solr.handler.component.ShardRequest;
+@@ -234,6 +240,7 @@ public class OverseerCollectionMessageHandler implements OverseerMessageHandler,
+         .put(ADDREPLICA, new AddReplicaCmd(this))
+         .put(MOVEREPLICA, new MoveReplicaCmd(this))
+         .put(UTILIZENODE, new UtilizeNodeCmd(this))
++        .put(MODIFYCDCR, this::modifyCdcr)
+         .build()
+     ;
+   }
+@@ -301,6 +308,75 @@ public class OverseerCollectionMessageHandler implements OverseerMessageHandler,
+     collectionCmd(message, params, results, Replica.State.ACTIVE, asyncId, requestMap);
+   }
+ 
++  private void modifyCdcr(ClusterState clusterState, ZkNodeProps message, NamedList results) throws IOException{
++    String collectionName = message.getStr(NAME);
++    CdcrConfigState cp = new CdcrConfigState(zkStateReader.getZkClient());
++    Map propsOnZK = cp.getCdcrConfigProperties(collectionName);
++
++    ModifiableSolrParams targets = null;
++    for (Map.Entry<String, Object> entry : message.getProperties().entrySet()) {
++      if (entry.getKey().startsWith(CdcrParams.REPLICATOR_PARAM)) { //replicator
++        Map<String, Object> replicatorConfig = (Map)propsOnZK.get(CdcrParams.REPLICATOR_PARAM);
++        if (replicatorConfig == null) {
++          replicatorConfig = new LinkedHashMap<>();
++        }
++        replicatorConfig.put(entry.getKey().substring(CdcrParams.REPLICATOR_PARAM.length() + 1),
++            Integer.parseInt(entry.getValue().toString()));
++        propsOnZK.put(CdcrParams.REPLICATOR_PARAM, replicatorConfig);
++      }
++      else if (entry.getKey().startsWith(CdcrParams.REPLICA_PARAM)) { //replica
++        if (targets == null) targets = new ModifiableSolrParams();
++        targets.add(entry.getKey().substring(CdcrParams.REPLICA_PARAM.length() + 1),
++            entry.getValue().toString());
++      }
++      else if (entry.getKey().startsWith(CdcrParams.UPDATE_LOG_SYNCHRONIZER_PARAM)) { //updateLogSynchronizer
++        Map<String, Object> ulsConfig = (Map)propsOnZK.get(CdcrParams.UPDATE_LOG_SYNCHRONIZER_PARAM);
++        if (ulsConfig == null) {
++          ulsConfig = new LinkedHashMap<>();
++        }
++        ulsConfig.put(entry.getKey().substring(CdcrParams.UPDATE_LOG_SYNCHRONIZER_PARAM.length() + 1),
++            Integer.parseInt(entry.getValue().toString()));
++        propsOnZK.put(CdcrParams.UPDATE_LOG_SYNCHRONIZER_PARAM, ulsConfig);
++      }
++    }
++
++    if (targets != null) {
++      List<Map> replicas = (List)propsOnZK.get(CdcrParams.REPLICA_PARAM);
++      if (Boolean.parseBoolean(targets.get(CdcrParams.REMOVE_PARAM))) {
++        Map toBeRemovedReplica = null;
++        if (replicas != null && replicas.size() > 0) {
++          for (Map replica : replicas) {
++            if (targets.get(CdcrParams.ZK_HOST_PARAM) != null && targets.get(CdcrParams.TARGET_COLLECTION_PARAM) != null
++                && targets.get(CdcrParams.ZK_HOST_PARAM).equals(replica.get(CdcrParams.ZK_HOST_PARAM))
++                && targets.get(CdcrParams.TARGET_COLLECTION_PARAM).equals(replica.get(CdcrParams.TARGET_COLLECTION_PARAM))) {
++              toBeRemovedReplica = replica;
++            }
++          }
++          if (toBeRemovedReplica != null) {
++            replicas.remove(toBeRemovedReplica);
++          }
++        }
++      } else {
++        Map target = new LinkedHashMap();
++        target.put(CdcrParams.ZK_HOST_PARAM,targets.get(CdcrParams.ZK_HOST_PARAM));
++        target.put(CdcrParams.TARGET_COLLECTION_PARAM,targets.get(CdcrParams.TARGET_COLLECTION_PARAM));
++        target.put(CdcrParams.SOURCE_COLLECTION_PARAM,collectionName);
++        if (replicas == null || replicas.size() == 0) {
++          replicas = new ArrayList<Map>();
++          replicas.add(target);
++        }
++      }
++      if (replicas.size() > 0) {
++        propsOnZK.put(CdcrParams.REPLICA_PARAM, replicas);
++      }
++    }
++
++    cp.updateCdcrConfig(collectionName, propsOnZK, true);
++
++    reloadCollection(clusterState, message, results);
++    results.add("message","success");
++  }
++
+   @SuppressWarnings("unchecked")
+   private void processRebalanceLeaders(ClusterState clusterState, ZkNodeProps message, NamedList results)
+       throws Exception {
+diff --git a/solr/core/src/java/org/apache/solr/core/SolrCore.java b/solr/core/src/java/org/apache/solr/core/SolrCore.java
+index f1bae421d4..94f1b72a8e 100644
+--- a/solr/core/src/java/org/apache/solr/core/SolrCore.java
++++ b/solr/core/src/java/org/apache/solr/core/SolrCore.java
+@@ -79,6 +79,7 @@ import org.apache.solr.cloud.RecoveryStrategy;
+ import org.apache.solr.cloud.ZkSolrResourceLoader;
+ import org.apache.solr.common.SolrException;
+ import org.apache.solr.common.SolrException.ErrorCode;
++import org.apache.solr.common.cloud.CdcrConfigState;
+ import org.apache.solr.common.cloud.ClusterState;
+ import org.apache.solr.common.cloud.DocCollection;
+ import org.apache.solr.common.cloud.Slice;
+@@ -98,6 +99,7 @@ import org.apache.solr.core.DirectoryFactory.DirContext;
+ import org.apache.solr.core.snapshots.SolrSnapshotManager;
+ import org.apache.solr.core.snapshots.SolrSnapshotMetaDataManager;
+ import org.apache.solr.core.snapshots.SolrSnapshotMetaDataManager.SnapshotMetaData;
++import org.apache.solr.handler.CdcrRequestHandler;
+ import org.apache.solr.handler.IndexFetcher;
+ import org.apache.solr.handler.ReplicationHandler;
+ import org.apache.solr.handler.RequestHandlerBase;
+@@ -224,6 +226,8 @@ public final class SolrCore implements SolrInfoBean, SolrMetricProducer, Closeab
+   private Counter newSearcherOtherErrorsCounter;
+   private final CoreContainer coreContainer;
+ 
++  private static final Map implicitPluginsInfo = (Map) Utils.fromJSONResource("ImplicitPlugins.json");
++
+   private Set<String> metricNames = ConcurrentHashMap.newKeySet();
+ 
+   public Set<String> getMetricNames() {
+@@ -962,6 +966,7 @@ public final class SolrCore implements SolrInfoBean, SolrMetricProducer, Closeab
+ 
+       // Processors initialized before the handlers
+       updateProcessorChains = loadUpdateProcessorChains();
++
+       reqHandlers = new RequestHandlers(this);
+       reqHandlers.initHandlersFromConfig(solrConfig);
+ 
+@@ -3044,11 +3049,10 @@ public final class SolrCore implements SolrInfoBean, SolrMetricProducer, Closeab
+     }
+   }
+ 
+-  private static final Map implicitPluginsInfo = (Map) Utils.fromJSONResource("ImplicitPlugins.json");
+-
+   public List<PluginInfo> getImplicitHandlers() {
+     List<PluginInfo> implicits = new ArrayList<>();
+     Map requestHandlers = (Map) implicitPluginsInfo.get(SolrRequestHandler.TYPE);
++    requestHandlers = checkIfCdcrConfigured(requestHandlers);
+     for (Object o : requestHandlers.entrySet()) {
+       Map.Entry<String, Map> entry = (Map.Entry<String, Map>) o;
+       Map info = Utils.getDeepCopy(entry.getValue(), 4);
+@@ -3058,6 +3062,27 @@ public final class SolrCore implements SolrInfoBean, SolrMetricProducer, Closeab
+     return implicits;
+   }
+ 
++  private Map checkIfCdcrConfigured(Map requestHandlers) {
++    try{
++      if (this.getCoreDescriptor() != null && this.getCoreDescriptor().getCollectionName() != null &&
++          this.getCoreContainer() != null && this.getCoreContainer().getZkController() != null &&
++          this.getCoreContainer().getZkController().getZkClient() != null) {
++        if (!CdcrConfigState.isCdcrConfiguredForColl(this.getCoreDescriptor().getCollectionName(),
++            this.getCoreContainer().getZkController().getZkClient())) { // if cdcr not configured, drop cdcr initialisation
++          requestHandlers.remove(CdcrRequestHandler.HANDLER_PATH);
++        }
++      } else {
++        requestHandlers.remove(CdcrRequestHandler.HANDLER_PATH);
++      }
++    } catch (InterruptedException | KeeperException e) {
++      log.error("Not able to verify whether CDCR is configured for this collection");
++    }
++    if (requestHandlers.get(CdcrRequestHandler.HANDLER_PATH) != null) {
++      log.info("CdcrRequestHandler implicity configured");
++    }
++    return requestHandlers;
++  }
++
+   /**
+    * Convenience method to load a blob. This method minimizes the degree to which component and other code needs 
+    * to depend on the structure of solr's object graph and ensures that a proper close hook is registered. This method 
+diff --git a/solr/core/src/java/org/apache/solr/handler/CdcrBufferStateManager.java b/solr/core/src/java/org/apache/solr/handler/CdcrBufferStateManager.java
+index fd8d4bb566..064db5e98d 100644
+--- a/solr/core/src/java/org/apache/solr/handler/CdcrBufferStateManager.java
++++ b/solr/core/src/java/org/apache/solr/handler/CdcrBufferStateManager.java
+@@ -28,6 +28,9 @@ import org.slf4j.LoggerFactory;
+ 
+ import java.lang.invoke.MethodHandles;
+ import java.nio.charset.Charset;
++import java.util.HashMap;
++import java.util.LinkedHashMap;
++import java.util.Map;
+ 
+ /**
+  * Manage the state of the update log buffer. It is responsible of synchronising the state
+@@ -42,7 +45,7 @@ class CdcrBufferStateManager extends CdcrStateManager {
+ 
+   private SolrCore core;
+ 
+-  static CdcrParams.BufferState DEFAULT_STATE = CdcrParams.BufferState.ENABLED;
++  static CdcrParams.BufferState DEFAULT_STATE = CdcrParams.BufferState.DISABLED;
+ 
+   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
+ 
+diff --git a/solr/core/src/java/org/apache/solr/handler/CdcrParams.java b/solr/core/src/java/org/apache/solr/handler/CdcrParams.java
+index 3f65b90585..81685b2727 100644
+--- a/solr/core/src/java/org/apache/solr/handler/CdcrParams.java
++++ b/solr/core/src/java/org/apache/solr/handler/CdcrParams.java
+@@ -76,6 +76,11 @@ public class CdcrParams {
+    */
+   public static final String DEFAULT_STATE_PARAM = "defaultState";
+ 
++  /**
++   * The replica remove param *
++   */
++  public static final String REMOVE_PARAM = "remove";
++
+   /**
+    * The latest update checkpoint on a target cluster *
+    */
+diff --git a/solr/core/src/java/org/apache/solr/handler/CdcrReplicatorManager.java b/solr/core/src/java/org/apache/solr/handler/CdcrReplicatorManager.java
+index d8f3d522b6..476e70b4c1 100644
+--- a/solr/core/src/java/org/apache/solr/handler/CdcrReplicatorManager.java
++++ b/solr/core/src/java/org/apache/solr/handler/CdcrReplicatorManager.java
+@@ -20,6 +20,10 @@ import java.io.Closeable;
+ import java.io.IOException;
+ import java.lang.invoke.MethodHandles;
+ import java.util.ArrayList;
++import java.util.Collections;
++import java.util.HashMap;
++import java.util.Iterator;
++import java.util.LinkedHashMap;
+ import java.util.List;
+ import java.util.Locale;
+ import java.util.Map;
+@@ -39,11 +43,13 @@ import org.apache.solr.common.SolrException;
+ import org.apache.solr.common.cloud.Replica;
+ import org.apache.solr.common.cloud.ZkCoreNodeProps;
+ import org.apache.solr.common.params.CommonParams;
++import org.apache.solr.common.params.MapSolrParams;
+ import org.apache.solr.common.params.ModifiableSolrParams;
+ import org.apache.solr.common.params.SolrParams;
+ import org.apache.solr.common.util.ExecutorUtil;
+ import org.apache.solr.common.util.IOUtils;
+ import org.apache.solr.common.util.NamedList;
++import org.apache.solr.common.util.Pair;
+ import org.apache.solr.common.util.SolrjNamedThreadFactory;
+ import org.apache.solr.common.util.TimeSource;
+ import org.apache.solr.core.SolrCore;
+@@ -87,21 +93,44 @@ class CdcrReplicatorManager implements CdcrStateManager.CdcrStateObserver {
+     List<SolrParams> targets = replicasConfiguration.get(myCollection);
+     if (targets != null) {
+       for (SolrParams params : targets) {
+-        String zkHost = params.get(CdcrParams.ZK_HOST_PARAM);
+-        String targetCollection = params.get(CdcrParams.TARGET_COLLECTION_PARAM);
+-
+-        CloudSolrClient client = new Builder()
+-            .withZkHost(zkHost)
+-            .sendUpdatesOnlyToShardLeaders()
+-            .build();
+-        client.setDefaultCollection(targetCollection);
+-        replicatorStates.add(new CdcrReplicatorState(targetCollection, zkHost, client));
++        addTarget(params);
+       }
+     }
+ 
+     this.scheduler = new CdcrReplicatorScheduler(this, replicatorConfiguration);
+   }
+ 
++  private void addTarget(SolrParams params) {
++    String zkHost = params.get(CdcrParams.ZK_HOST_PARAM);
++    String targetCollection = params.get(CdcrParams.TARGET_COLLECTION_PARAM);
++
++    CloudSolrClient client = new Builder()
++        .withZkHost(zkHost)
++        .sendUpdatesOnlyToShardLeaders()
++        .build();
++    client.setDefaultCollection(targetCollection);
++    replicatorStates.add(new CdcrReplicatorState(targetCollection, zkHost, client));
++  }
++
++  public Map getReplicatorParams() {
++    if (this.scheduler != null) {
++      return this.scheduler.getConfigs();
++    }
++    return new LinkedHashMap();
++  }
++
++  public List getReplicasParams(String collection) {
++    List<Object> replicas = new ArrayList<>();
++    for (CdcrReplicatorState entry : replicatorStates) {
++      Map<String, Object> replica = new HashMap<>();
++      replica.put(CdcrParams.ZK_HOST_PARAM, entry.getZkHost());
++      replica.put(CdcrParams.TARGET_COLLECTION_PARAM, entry.getTargetCollection());
++      replica.put(CdcrParams.SOURCE_COLLECTION_PARAM, collection);
++      replicas.add(replica);
++    }
++    return replicas;
++  }
++
+   void setProcessStateManager(final CdcrProcessStateManager processStateManager) {
+     this.processStateManager = processStateManager;
+     this.processStateManager.register(this);
+diff --git a/solr/core/src/java/org/apache/solr/handler/CdcrReplicatorScheduler.java b/solr/core/src/java/org/apache/solr/handler/CdcrReplicatorScheduler.java
+index 62abeab836..a36e4a1364 100644
+--- a/solr/core/src/java/org/apache/solr/handler/CdcrReplicatorScheduler.java
++++ b/solr/core/src/java/org/apache/solr/handler/CdcrReplicatorScheduler.java
+@@ -18,11 +18,15 @@ package org.apache.solr.handler;
+ 
+ import org.apache.solr.common.params.SolrParams;
+ import org.apache.solr.common.util.ExecutorUtil;
++import org.apache.solr.common.util.Pair;
++import org.apache.solr.core.SolrCore;
+ import org.apache.solr.util.DefaultSolrThreadFactory;
+ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
+ 
+ import java.lang.invoke.MethodHandles;
++import java.util.HashMap;
++import java.util.Map;
+ import java.util.concurrent.*;
+ 
+ /**
+@@ -46,12 +50,12 @@ class CdcrReplicatorScheduler {
+   private int batchSize = DEFAULT_BATCH_SIZE;
+ 
+   private static final int DEFAULT_POOL_SIZE = 2;
+-  private static final int DEFAULT_TIME_SCHEDULE = 10;
++  private static final int DEFAULT_TIME_SCHEDULE = 1000;
+   private static final int DEFAULT_BATCH_SIZE = 128;
+ 
+   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
+ 
+-  CdcrReplicatorScheduler(final CdcrReplicatorManager replicatorStatesManager, final SolrParams replicatorConfiguration) {
++  CdcrReplicatorScheduler( final CdcrReplicatorManager replicatorStatesManager, final SolrParams replicatorConfiguration) {
+     this.replicatorManager = replicatorStatesManager;
+     this.statesQueue = new ConcurrentLinkedQueue<>(replicatorManager.getReplicatorStates());
+     if (replicatorConfiguration != null) {
+@@ -61,6 +65,14 @@ class CdcrReplicatorScheduler {
+     }
+   }
+ 
++  public Map getConfigs() {
++    Map<String, Object> config = new HashMap<>();
++    config.put(CdcrParams.THREAD_POOL_SIZE_PARAM, poolSize);
++    config.put(CdcrParams.SCHEDULE_PARAM, timeSchedule);
++    config.put(CdcrParams.BATCH_SIZE_PARAM, batchSize);
++    return config;
++  }
++
+   void start() {
+     if (!isStarted) {
+       scheduler = Executors.newSingleThreadScheduledExecutor(new DefaultSolrThreadFactory("cdcr-scheduler"));
+diff --git a/solr/core/src/java/org/apache/solr/handler/CdcrRequestHandler.java b/solr/core/src/java/org/apache/solr/handler/CdcrRequestHandler.java
+index 430237e5c8..1228dac079 100644
+--- a/solr/core/src/java/org/apache/solr/handler/CdcrRequestHandler.java
++++ b/solr/core/src/java/org/apache/solr/handler/CdcrRequestHandler.java
+@@ -22,6 +22,7 @@ import java.lang.invoke.MethodHandles;
+ import java.util.ArrayList;
+ import java.util.Collection;
+ import java.util.HashMap;
++import java.util.LinkedHashMap;
+ import java.util.List;
+ import java.util.Map;
+ import java.util.concurrent.Callable;
+@@ -42,6 +43,7 @@ import org.apache.solr.client.solrj.request.QueryRequest;
+ import org.apache.solr.client.solrj.request.UpdateRequest;
+ import org.apache.solr.cloud.ZkController;
+ import org.apache.solr.common.SolrException;
++import org.apache.solr.common.cloud.CdcrConfigState;
+ import org.apache.solr.common.cloud.ClusterState;
+ import org.apache.solr.common.cloud.DocCollection;
+ import org.apache.solr.common.cloud.Slice;
+@@ -109,6 +111,9 @@ public class CdcrRequestHandler extends RequestHandlerBase implements SolrCoreAw
+ 
+   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
+ 
++  public static final String NAME = "cdcr";
++  public static final String HANDLER_PATH = "/" + NAME;
++
+   private SolrCore core;
+   private String collection;
+   private String shard;
+@@ -126,6 +131,8 @@ public class CdcrRequestHandler extends RequestHandlerBase implements SolrCoreAw
+   private CdcrUpdateLogSynchronizer updateLogSynchronizer;
+   private CdcrBufferManager bufferManager;
+ 
++  private CdcrConfigState cp;
++
+   @Override
+   public void init(NamedList args) {
+     super.init(args);
+@@ -226,11 +233,11 @@ public class CdcrRequestHandler extends RequestHandlerBase implements SolrCoreAw
+         this.handleBootstrapAction(req, rsp);
+         break;
+       }
+-      case BOOTSTRAP_STATUS:  {
++      case BOOTSTRAP_STATUS: {
+         this.handleBootstrapStatus(req, rsp);
+         break;
+       }
+-      case CANCEL_BOOTSTRAP:  {
++      case CANCEL_BOOTSTRAP: {
+         this.handleCancelBootstrap(req, rsp);
+         break;
+       }
+@@ -242,12 +249,55 @@ public class CdcrRequestHandler extends RequestHandlerBase implements SolrCoreAw
+     rsp.setHttpCaching(false);
+   }
+ 
++  private void fillConfigFromZK(SolrCore core, String collection) {
++
++    Map<String, Object> components = core.getCoreContainer().getZkController().getZkStateReader().
++        getCdcrConfigProperties(collection);
++
++    if (components != null && components.values().size() > 0) {
++      for (Map.Entry<String, Object> component : components.entrySet()) {
++
++        if (component.getKey().equals(CdcrParams.REPLICA_PARAM)) {
++          List<Map> replicas = (List) component.getValue();
++          List<SolrParams> cdcrSolrListParams = new ArrayList<>();
++          for (Map replica : replicas) {
++            ModifiableSolrParams currSolrParams = new ModifiableSolrParams();
++            for (Object currCdcrValue : replica.entrySet()) {
++              currSolrParams.setNonNull(((Map.Entry<String, Object>) currCdcrValue).getKey(),
++                  ((Map.Entry<String, Object>) currCdcrValue).getValue().toString());
++            }
++            cdcrSolrListParams.add(currSolrParams);
++          }
++          replicasConfiguration = new HashMap<>();
++          replicasConfiguration.put(collection, cdcrSolrListParams);
++        } else if (component.getKey().equals(CdcrParams.REPLICATOR_PARAM) ||
++            component.getKey().equals(CdcrParams.UPDATE_LOG_SYNCHRONIZER_PARAM)) {
++
++          Map<String, Object> currCdcrValues = (Map<String, Object>) component.getValue();
++          ModifiableSolrParams currSolrParams = new ModifiableSolrParams();
++
++          for (Map.Entry<String, Object> currCdcrValue : currCdcrValues.entrySet()) {
++            currSolrParams.setNonNull(currCdcrValue.getKey(), currCdcrValue.getValue().toString());
++          }
++
++          if (component.getKey().equals(CdcrParams.REPLICATOR_PARAM)) {
++            replicatorConfiguration = currSolrParams;
++          } else if (component.getKey().equals(CdcrParams.UPDATE_LOG_SYNCHRONIZER_PARAM)) {
++            updateLogSynchronizerConfiguration = currSolrParams;
++          }
++        }
++      }
++    }
++  }
++
+   @Override
+   public void inform(SolrCore core) {
+     this.core = core;
+     collection = core.getCoreDescriptor().getCloudDescriptor().getCollectionName();
+     shard = core.getCoreDescriptor().getCloudDescriptor().getShardId();
+ 
++    fillConfigFromZK(core, collection);
++
+     // Make sure that the core is ZKAware
+     if (!core.getCoreContainer().isZooKeeperAware()) {
+       throw new SolrException(SolrException.ErrorCode.SERVER_ERROR,
+@@ -286,6 +336,7 @@ public class CdcrRequestHandler extends RequestHandlerBase implements SolrCoreAw
+ 
+     // Initialise the buffer state manager
+     bufferStateManager = new CdcrBufferStateManager(core, bufferConfiguration);
++
+     // Initialise the process state manager
+     processStateManager = new CdcrProcessStateManager(core);
+     // Initialise the leader state manager
+@@ -295,6 +346,7 @@ public class CdcrRequestHandler extends RequestHandlerBase implements SolrCoreAw
+     replicatorManager = new CdcrReplicatorManager(core, path, replicatorConfiguration, replicasConfiguration);
+     replicatorManager.setProcessStateManager(processStateManager);
+     replicatorManager.setLeaderStateManager(leaderStateManager);
++
+     // we need to inform it of a state event since the process and leader state
+     // may have been synchronised during the initialisation
+     replicatorManager.stateUpdate();
+@@ -302,6 +354,7 @@ public class CdcrRequestHandler extends RequestHandlerBase implements SolrCoreAw
+     // Initialise the update log synchronizer
+     updateLogSynchronizer = new CdcrUpdateLogSynchronizer(core, path, updateLogSynchronizerConfiguration);
+     updateLogSynchronizer.setLeaderStateManager(leaderStateManager);
++
+     // we need to inform it of a state event since the leader state
+     // may have been synchronised during the initialisation
+     updateLogSynchronizer.stateUpdate();
+@@ -314,10 +367,69 @@ public class CdcrRequestHandler extends RequestHandlerBase implements SolrCoreAw
+     // may have been synchronised during the initialisation
+     bufferManager.stateUpdate();
+ 
++    cp = new CdcrConfigState(this.core.getCoreContainer().getZkController().getZkClient());
++    try {
++      uploadConfigsToZK();
++    } catch (IOException e) {
++      log.error("Cdcr configs not uploaded to ZK due to {}", e.getMessage());
++    }
++
+     // register the close hook
+     this.registerCloseHook(core);
+   }
+ 
++  private void uploadConfigsToZK(Map updatedConfigFromZK) {
++    if (updatedConfigFromZK == null || updatedConfigFromZK.isEmpty()) {
++      return;
++    }
++    try {
++      cp.updateCdcrConfig(collection, updatedConfigFromZK, false);
++    } catch (IOException e) {
++      log.error("Failed to upload updated cdcr config properties");
++      e.printStackTrace();
++    }
++  }
++
++  private void uploadConfigsToZK() throws IOException{
++    Map configInZK = cp.getCdcrConfigProperties(this.collection);
++
++    Map<String, Object> updatedConfigFromZK = new LinkedHashMap<>();
++    List replicas = (List) configInZK.get(CdcrParams.REPLICA_PARAM);
++    if (replicas == null || replicas.isEmpty()) {
++      if (!replicatorManager.getReplicasParams(collection).isEmpty()) {
++        replicas = replicatorManager.getReplicasParams(collection);
++        updatedConfigFromZK.put(CdcrParams.REPLICA_PARAM, replicas);
++      }
++    }
++
++    if (configInZK.get(CdcrParams.REPLICATOR_PARAM) == null) {
++      updatedConfigFromZK.put(CdcrParams.REPLICATOR_PARAM, replicatorManager.getReplicatorParams());
++    } else {
++      boolean toUpdate = false;
++      Map replicatorConfig = (Map) configInZK.get(CdcrParams.REPLICATOR_PARAM);
++      if (replicatorConfig.get(CdcrParams.SCHEDULE_PARAM) == null) {
++        replicatorConfig.put(CdcrParams.SCHEDULE_PARAM, replicatorManager.getReplicatorParams().get(CdcrParams.SCHEDULE_PARAM));
++        toUpdate = true;
++      }
++      if (replicatorConfig.get(CdcrParams.BATCH_SIZE_PARAM) == null) {
++        replicatorConfig.put(CdcrParams.BATCH_SIZE_PARAM, replicatorManager.getReplicatorParams().get(CdcrParams.BATCH_SIZE_PARAM));
++        toUpdate = true;
++      }
++      if (replicatorConfig.get(CdcrParams.THREAD_POOL_SIZE_PARAM) == null) {
++        replicatorConfig.put(CdcrParams.THREAD_POOL_SIZE_PARAM, replicatorManager.getReplicatorParams().get(CdcrParams.THREAD_POOL_SIZE_PARAM));
++        toUpdate = true;
++      }
++      if (toUpdate) {
++        updatedConfigFromZK.put(CdcrParams.REPLICATOR_PARAM, replicatorConfig);
++      }
++    }
++    if (configInZK.get(CdcrParams.UPDATE_LOG_SYNCHRONIZER_PARAM) == null) {
++      updatedConfigFromZK.put(CdcrParams.UPDATE_LOG_SYNCHRONIZER_PARAM, updateLogSynchronizer.getConfigParams());
++    }
++
++    uploadConfigsToZK(updatedConfigFromZK);
++  }
++
+   /**
+    * register a close hook to properly shutdown the state manager and scheduler
+    */
+@@ -401,7 +513,7 @@ public class CdcrRequestHandler extends RequestHandlerBase implements SolrCoreAw
+     }
+     ClusterState cstate = zkController.getClusterState();
+     DocCollection docCollection = cstate.getCollectionOrNull(collection);
+-    Collection<Slice> shards = docCollection == null? null : docCollection.getActiveSlices();
++    Collection<Slice> shards = docCollection == null ? null : docCollection.getActiveSlices();
+ 
+     ExecutorService parallelExecutor = ExecutorUtil.newMDCAwareCachedThreadPool(new DefaultSolrThreadFactory("parallelCdcrExecutor"));
+ 
+@@ -634,9 +746,9 @@ public class CdcrRequestHandler extends RequestHandlerBase implements SolrCoreAw
+       boolean locked = recoveryLock.tryLock();
+       SolrCoreState coreState = core.getSolrCoreState();
+       try {
+-        if (!locked)  {
++        if (!locked) {
+           handleCancelBootstrap(req, rsp);
+-        } else if (leaderStateManager.amILeader())  {
++        } else if (leaderStateManager.amILeader()) {
+           coreState.setCdcrBootstrapRunning(true);
+           latch.countDown(); // free the latch as current bootstrap is executing
+           //running.set(true);
+@@ -654,7 +766,7 @@ public class CdcrRequestHandler extends RequestHandlerBase implements SolrCoreAw
+           } catch (ExecutionException e) {
+             log.error("Bootstrap operation failed", e);
+           }
+-        } else  {
++        } else {
+           log.error("Action {} sent to non-leader replica @ {}:{}. Aborting bootstrap.", CdcrParams.CdcrAction.BOOTSTRAP, collectionName, shard);
+         }
+       } finally {
+@@ -671,14 +783,14 @@ public class CdcrRequestHandler extends RequestHandlerBase implements SolrCoreAw
+       core.getCoreContainer().getUpdateShardHandler().getUpdateExecutor().submit(runnable);
+       rsp.add(RESPONSE_STATUS, "submitted");
+       latch.await(10000, TimeUnit.MILLISECONDS); // put the latch for current bootstrap command
+-    } catch (RejectedExecutionException ree)  {
++    } catch (RejectedExecutionException ree) {
+       // no problem, we're probably shutting down
+       rsp.add(RESPONSE_STATUS, "failed");
+     }
+   }
+ 
+   private void handleCancelBootstrap(SolrQueryRequest req, SolrQueryResponse rsp) {
+-    BootstrapCallable callable = (BootstrapCallable)core.getSolrCoreState().getCdcrBootstrapCallable();
++    BootstrapCallable callable = (BootstrapCallable) core.getSolrCoreState().getCdcrBootstrapCallable();
+     IOUtils.closeQuietly(callable);
+     rsp.add(RESPONSE_STATUS, "cancelled");
+   }
+@@ -691,7 +803,7 @@ public class CdcrRequestHandler extends RequestHandlerBase implements SolrCoreAw
+     }
+ 
+     Future<Boolean> future = coreState.getCdcrBootstrapFuture();
+-    BootstrapCallable callable = (BootstrapCallable)coreState.getCdcrBootstrapCallable();
++    BootstrapCallable callable = (BootstrapCallable) coreState.getCdcrBootstrapCallable();
+     if (future == null) {
+       rsp.add(RESPONSE_STATUS, "notfound");
+       rsp.add(RESPONSE_MESSAGE, "No bootstrap found in running, completed or failed states");
+diff --git a/solr/core/src/java/org/apache/solr/handler/CdcrUpdateLogSynchronizer.java b/solr/core/src/java/org/apache/solr/handler/CdcrUpdateLogSynchronizer.java
+index 80f27ceec0..cdcef78075 100644
+--- a/solr/core/src/java/org/apache/solr/handler/CdcrUpdateLogSynchronizer.java
++++ b/solr/core/src/java/org/apache/solr/handler/CdcrUpdateLogSynchronizer.java
+@@ -18,6 +18,9 @@ package org.apache.solr.handler;
+ 
+ import java.io.IOException;
+ import java.lang.invoke.MethodHandles;
++import java.util.HashMap;
++import java.util.LinkedHashMap;
++import java.util.Map;
+ import java.util.concurrent.Executors;
+ import java.util.concurrent.ScheduledExecutorService;
+ import java.util.concurrent.TimeUnit;
+@@ -35,6 +38,7 @@ import org.apache.solr.common.params.CommonParams;
+ import org.apache.solr.common.params.ModifiableSolrParams;
+ import org.apache.solr.common.params.SolrParams;
+ import org.apache.solr.common.util.NamedList;
++import org.apache.solr.common.util.Pair;
+ import org.apache.solr.core.SolrCore;
+ import org.apache.solr.update.CdcrUpdateLog;
+ import org.apache.solr.util.DefaultSolrThreadFactory;
+@@ -65,7 +69,7 @@ class CdcrUpdateLogSynchronizer implements CdcrStateManager.CdcrStateObserver {
+ 
+   private int timeSchedule = DEFAULT_TIME_SCHEDULE;
+ 
+-  private static final int DEFAULT_TIME_SCHEDULE = 60000;  // by default, every minute
++  private static final int DEFAULT_TIME_SCHEDULE = 60000;  // by default, every six seconds
+ 
+   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
+ 
+@@ -79,6 +83,12 @@ class CdcrUpdateLogSynchronizer implements CdcrStateManager.CdcrStateObserver {
+     }
+   }
+ 
++  public Map getConfigParams() {
++    Map<String, Object> uLSMap = new LinkedHashMap<>();
++    uLSMap.put(CdcrParams.SCHEDULE_PARAM, timeSchedule);
++    return uLSMap;
++  }
++
+   void setLeaderStateManager(final CdcrLeaderStateManager leaderStateManager) {
+     this.leaderStateManager = leaderStateManager;
+     this.leaderStateManager.register(this);
+diff --git a/solr/core/src/java/org/apache/solr/handler/admin/CollectionsHandler.java b/solr/core/src/java/org/apache/solr/handler/admin/CollectionsHandler.java
+index 56f979d3a4..f65c56ccac 100644
+--- a/solr/core/src/java/org/apache/solr/handler/admin/CollectionsHandler.java
++++ b/solr/core/src/java/org/apache/solr/handler/admin/CollectionsHandler.java
+@@ -82,6 +82,8 @@ import org.apache.solr.core.CoreContainer;
+ import org.apache.solr.core.backup.repository.BackupRepository;
+ import org.apache.solr.core.snapshots.CollectionSnapshotMetaData;
+ import org.apache.solr.core.snapshots.SolrSnapshotManager;
++import org.apache.solr.handler.CdcrParams;
++import org.apache.solr.handler.CdcrRequestHandler;
+ import org.apache.solr.handler.RequestHandlerBase;
+ import org.apache.solr.handler.component.ShardHandler;
+ import org.apache.solr.request.SolrQueryRequest;
+@@ -117,6 +119,7 @@ import static org.apache.solr.common.cloud.DocCollection.RULE;
+ import static org.apache.solr.common.cloud.DocCollection.SNITCH;
+ import static org.apache.solr.common.cloud.DocCollection.STATE_FORMAT;
+ import static org.apache.solr.common.cloud.ZkStateReader.AUTO_ADD_REPLICAS;
++import static org.apache.solr.common.cloud.ZkStateReader.CDCR_PREFIX;
+ import static org.apache.solr.common.cloud.ZkStateReader.COLLECTION_PROP;
+ import static org.apache.solr.common.cloud.ZkStateReader.MAX_SHARDS_PER_NODE;
+ import static org.apache.solr.common.cloud.ZkStateReader.NRT_REPLICAS;
+@@ -422,7 +425,8 @@ public class CollectionsHandler extends RequestHandlerBase implements Permission
+           TLOG_REPLICAS,
+           NRT_REPLICAS,
+           POLICY,
+-          WAIT_FOR_FINAL_STATE);
++          WAIT_FOR_FINAL_STATE,
++          CdcrRequestHandler.NAME);
+ 
+       if (props.get(STATE_FORMAT) == null) {
+         props.put(STATE_FORMAT, "2");
+@@ -443,6 +447,12 @@ public class CollectionsHandler extends RequestHandlerBase implements Permission
+ 
+       }
+       copyPropertiesWithPrefix(req.getParams(), props, COLL_PROP_PREFIX);
++
++      //cdcr specific properties
++      copyPropertiesWithPrefix(req.getParams(), props, CDCR_PREFIX + CdcrParams.UPDATE_LOG_SYNCHRONIZER_PARAM);
++      copyPropertiesWithPrefix(req.getParams(), props, CDCR_PREFIX + CdcrParams.REPLICA_PARAM);
++      copyPropertiesWithPrefix(req.getParams(), props, CDCR_PREFIX + CdcrParams.REPLICATOR_PARAM);
++
+       return copyPropertiesWithPrefix(req.getParams(), props, "router.");
+ 
+     }),
+@@ -660,6 +670,14 @@ public class CollectionsHandler extends RequestHandlerBase implements Permission
+     }),
+     OVERSEERSTATUS_OP(OVERSEERSTATUS, (req, rsp, h) -> (Map) new LinkedHashMap<>()),
+ 
++    MODIFYCDCR_OP(MODIFYCDCR, (req, rsp, h) -> {
++      Map<String, Object> props = req.getParams().getAll(null,NAME);
++      copyPropertiesWithPrefix(req.getParams(), props, CdcrParams.UPDATE_LOG_SYNCHRONIZER_PARAM);
++      copyPropertiesWithPrefix(req.getParams(), props, CdcrParams.REPLICA_PARAM);
++      return copyPropertiesWithPrefix(req.getParams(), props, CdcrParams.REPLICATOR_PARAM);
++
++    }),
++
+     /**
+      * Handle list collection request.
+      * Do list collection request to zk host
+diff --git a/solr/core/src/java/org/apache/solr/update/CdcrUpdateLog.java b/solr/core/src/java/org/apache/solr/update/CdcrUpdateLog.java
+index 6b202044d7..02a9dd8baa 100644
+--- a/solr/core/src/java/org/apache/solr/update/CdcrUpdateLog.java
++++ b/solr/core/src/java/org/apache/solr/update/CdcrUpdateLog.java
+@@ -53,6 +53,8 @@ import org.slf4j.LoggerFactory;
+  */
+ public class CdcrUpdateLog extends UpdateLog {
+ 
++  public static final String CLASS_NAME = "solr.CdcrUpdateLog";
++
+   protected final Map<CdcrLogReader, CdcrLogPointer> logPointers = new ConcurrentHashMap<>();
+ 
+   /**
+diff --git a/solr/core/src/java/org/apache/solr/update/UpdateHandler.java b/solr/core/src/java/org/apache/solr/update/UpdateHandler.java
+index ff94bfc547..6f35844d0d 100644
+--- a/solr/core/src/java/org/apache/solr/update/UpdateHandler.java
++++ b/solr/core/src/java/org/apache/solr/update/UpdateHandler.java
+@@ -19,11 +19,14 @@ package org.apache.solr.update;
+ 
+ import java.io.IOException;
+ import java.lang.invoke.MethodHandles;
++import java.util.HashMap;
++import java.util.Map;
+ import java.util.Set;
+ import java.util.Vector;
+ import java.util.concurrent.ConcurrentHashMap;
+ 
+ import com.codahale.metrics.MetricRegistry;
++import org.apache.solr.common.cloud.CdcrConfigState;
+ import org.apache.solr.core.DirectoryFactory;
+ import org.apache.solr.core.HdfsDirectoryFactory;
+ import org.apache.solr.core.PluginInfo;
+@@ -121,8 +124,24 @@ public abstract class UpdateHandler implements SolrInfoBean {
+     idField = core.getLatestSchema().getUniqueKeyField();
+     idFieldType = idField!=null ? idField.getType() : null;
+     parseEventListeners();
+-    PluginInfo ulogPluginInfo = core.getSolrConfig().getPluginInfo(UpdateLog.class.getName());
+ 
++    PluginInfo ulogPluginInfo = null;
++
++    ulogPluginInfo = core.getSolrConfig().getPluginInfo(UpdateLog.class.getName());
++
++    try {
++      //if (isCdcrEnabled()) { //use CdcrUpdateLog instead of conventional one
++      if (core.getCoreDescriptor() != null && core.getCoreDescriptor().getCollectionName() != null && core.getCoreContainer() != null &&
++          core.getCoreContainer().getZkController() != null && core.getCoreContainer().getZkController().getZkClient() != null) {
++        if (CdcrConfigState.isCdcrConfiguredForColl(core.getCoreDescriptor().getCollectionName(), core.getCoreContainer().getZkController().getZkClient())) {
++          Map<String, String> attrs = new HashMap<>();
++          attrs.put("class", CdcrUpdateLog.CLASS_NAME);
++          ulogPluginInfo = new PluginInfo("updateLog", attrs, core.getSolrConfig().getPluginInfo(UpdateLog.class.getName()).initArgs, null);
++        }
++      }
++    } catch (Exception e) {
++      log.error("not able to read data from zookeeper");
++    }
+ 
+     // If this is a replica of type PULL, don't create the update log
+     boolean skipUpdateLog = core.getCoreDescriptor().getCloudDescriptor() != null && !core.getCoreDescriptor().getCloudDescriptor().requiresTransactionLog();
+@@ -237,4 +256,5 @@ public abstract class UpdateHandler implements SolrInfoBean {
+   public MetricRegistry getMetricRegistry() {
+     return registry;
+   }
++
+ }
+diff --git a/solr/core/src/java/org/apache/solr/update/UpdateLog.java b/solr/core/src/java/org/apache/solr/update/UpdateLog.java
+index fc029172b7..5789851530 100644
+--- a/solr/core/src/java/org/apache/solr/update/UpdateLog.java
++++ b/solr/core/src/java/org/apache/solr/update/UpdateLog.java
+@@ -1440,7 +1440,7 @@ public class UpdateLog implements PluginInfoInitialized, SolrMetricProducer {
+                   if (oper == UpdateLog.DELETE_BY_QUERY) {
+                     deleteByQueryList.add(update);
+                   } else if (oper == UpdateLog.DELETE) {
+-                    deleteList.add(new DeleteUpdate(version, (byte[])entry.get(entry.size()-1)));
++                    deleteList.add(new DeleteUpdate(version, (byte[])entry.get(2)));
+                   }
+ 
+                   break;
+diff --git a/solr/core/src/java/org/apache/solr/util/SolrCLI.java b/solr/core/src/java/org/apache/solr/util/SolrCLI.java
+index f4cd7c7823..2f6fdd5137 100644
+--- a/solr/core/src/java/org/apache/solr/util/SolrCLI.java
++++ b/solr/core/src/java/org/apache/solr/util/SolrCLI.java
+@@ -1357,7 +1357,11 @@ public class SolrCLI {
+         OptionBuilder
+             .isRequired(false)
+             .withDescription("Enable more verbose command output.")
+-            .create("verbose")
++            .create("verbose"),
++        OptionBuilder
++            .isRequired(false)
++            .withDescription("configure collection with cdcr")
++            .create("cdcr")
+             
+   };
+ 
+@@ -1571,6 +1575,9 @@ public class SolrCLI {
+       if (confname != null && !"".equals(confname.trim())) {
+         createCollectionUrl = createCollectionUrl + String.format(Locale.ROOT, "&collection.configName=%s", confname);
+       }
++      if (cli.hasOption("cdcr")) {
++        createCollectionUrl = createCollectionUrl + String.format(Locale.ROOT, "&cdcr=%s", "true");
++      }
+ 
+       echoIfVerbose("\nCreating new collection '"+collectionName+"' using command:\n"+createCollectionUrl+"\n", cli);
+ 
+diff --git a/solr/core/src/resources/ImplicitPlugins.json b/solr/core/src/resources/ImplicitPlugins.json
+index a1ddbe7c5d..3323f59351 100644
+--- a/solr/core/src/resources/ImplicitPlugins.json
++++ b/solr/core/src/resources/ImplicitPlugins.json
+@@ -161,6 +161,10 @@
+         "echoParams": "explicit",
+         "echoHandler": true
+       }
++    },
++    "/cdcr": {
++      "useParams":"_CDCR",
++      "class": "solr.CdcrRequestHandler"
+     }
+   }
+ }
+diff --git a/solr/core/src/test-files/solr/configsets/cdcr-cluster2/conf/managed-schema b/solr/core/src/test-files/solr/configsets/cdcr-cluster2/conf/managed-schema
+deleted file mode 100644
+index 2df6c0a444..0000000000
+--- a/solr/core/src/test-files/solr/configsets/cdcr-cluster2/conf/managed-schema
++++ /dev/null
+@@ -1,29 +0,0 @@
+-<?xml version="1.0" encoding="UTF-8" ?>
+-<!--
+- Licensed to the Apache Software Foundation (ASF) under one or more
+- contributor license agreements.  See the NOTICE file distributed with
+- this work for additional information regarding copyright ownership.
+- The ASF licenses this file to You under the Apache License, Version 2.0
+- (the "License"); you may not use this file except in compliance with
+- the License.  You may obtain a copy of the License at
+-
+-     http://www.apache.org/licenses/LICENSE-2.0
+-
+- Unless required by applicable law or agreed to in writing, software
+- distributed under the License is distributed on an "AS IS" BASIS,
+- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- See the License for the specific language governing permissions and
+- limitations under the License.
+--->
+-<schema name="minimal" version="1.1">
+-  <types>
+-    <fieldType name="string" class="solr.StrField"/>
+-    <fieldType name="long" class="${solr.tests.LongFieldType}" docValues="${solr.tests.numeric.dv}" precisionStep="0" positionIncrementGap="0"/>
+-  </types>
+-  <fields>
+-    <field name="id" type="string" indexed="true" stored="true"/>
+-    <field name="_version_" type="long" indexed="true" stored="true"/>
+-    <dynamicField name="*" type="string" indexed="true" stored="true"/>
+-  </fields>
+-  <uniqueKey>id</uniqueKey>
+-</schema>
+diff --git a/solr/core/src/test-files/solr/configsets/cdcr-cluster2/conf/solrconfig.xml b/solr/core/src/test-files/solr/configsets/cdcr-cluster2/conf/solrconfig.xml
+deleted file mode 100644
+index 8e26d4507c..0000000000
+--- a/solr/core/src/test-files/solr/configsets/cdcr-cluster2/conf/solrconfig.xml
++++ /dev/null
+@@ -1,80 +0,0 @@
+-<?xml version="1.0" ?>
+-
+-<!--
+- Licensed to the Apache Software Foundation (ASF) under one or more
+- contributor license agreements.  See the NOTICE file distributed with
+- this work for additional information regarding copyright ownership.
+- The ASF licenses this file to You under the Apache License, Version 2.0
+- (the "License"); you may not use this file except in compliance with
+- the License.  You may obtain a copy of the License at
+-
+-     http://www.apache.org/licenses/LICENSE-2.0
+-
+- Unless required by applicable law or agreed to in writing, software
+- distributed under the License is distributed on an "AS IS" BASIS,
+- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- See the License for the specific language governing permissions and
+- limitations under the License.
+--->
+-
+-<!-- This is a "kitchen sink" config file that tests can use.
+-     When writting a new test, feel free to add *new* items (plugins,
+-     config options, etc...) as long as they don't break any existing
+-     tests.  if you need to test something esoteric please add a new
+-     "solrconfig-your-esoteric-purpose.xml" config file.
+-
+-     Note in particular that this test is used by MinimalSchemaTest so
+-     Anything added to this file needs to work correctly even if there
+-     is now uniqueKey or defaultSearch Field.
+-  -->
+-
+-<config>
+-
+-  <dataDir>${solr.data.dir:}</dataDir>
+-
+-  <directoryFactory name="DirectoryFactory"
+-                    class="${solr.directoryFactory:solr.NRTCachingDirectoryFactory}"/>
+-
+-  <luceneMatchVersion>${tests.luceneMatchVersion:LATEST}</luceneMatchVersion>
+-
+-  <updateRequestProcessorChain name="cdcr-processor-chain">
+-    <processor class="solr.CdcrUpdateProcessorFactory"/>
+-    <processor class="solr.RunUpdateProcessorFactory"/>
+-  </updateRequestProcessorChain>
+-
+-  <requestHandler name="/cdcr" class="solr.CdcrRequestHandler">
+-    <lst name="replica">
+-      <str name="zkHost">${cdcr.cluster1.zkHost}</str>
+-      <str name="source">cdcr-cluster2</str>
+-      <str name="target">cdcr-cluster1</str>
+-    </lst>
+-    <lst name="replicator">
+-      <str name="threadPoolSize">1</str>
+-      <str name="schedule">1000</str>
+-      <str name="batchSize">1000</str>
+-    </lst>
+-    <lst name="updateLogSynchronizer">
+-      <str name="schedule">1000</str>
+-    </lst>
+-  </requestHandler>
+-
+-  <updateHandler class="solr.DirectUpdateHandler2">
+-    <updateLog class="solr.CdcrUpdateLog">
+-      <str name="dir">${solr.ulog.dir:}</str>
+-    </updateLog>
+-  </updateHandler>
+-
+-  <requestHandler name="/select" class="solr.SearchHandler" />
+-
+-  <initParams path="/update/**,/query,/select,/tvrh,/elevate,/spell,/browse">
+-    <lst name="defaults">
+-      <str name="df">_text_</str>
+-    </lst>
+-  </initParams>
+-
+-  <requestHandler name="/update" class="solr.UpdateRequestHandler">
+-    <lst name="defaults">
+-      <str name="update.chain">cdcr-processor-chain</str>
+-    </lst>
+-  </requestHandler>
+-</config>
+\ No newline at end of file
+diff --git a/solr/core/src/test-files/solr/configsets/cdcr-cluster1/conf/managed-schema b/solr/core/src/test-files/solr/configsets/cdcr-common/conf/managed-schema
+similarity index 100%
+rename from solr/core/src/test-files/solr/configsets/cdcr-cluster1/conf/managed-schema
+rename to solr/core/src/test-files/solr/configsets/cdcr-common/conf/managed-schema
+diff --git a/solr/core/src/test-files/solr/configsets/cdcr-cluster1/conf/solrconfig.xml b/solr/core/src/test-files/solr/configsets/cdcr-common/conf/solrconfig.xml
+similarity index 80%
+rename from solr/core/src/test-files/solr/configsets/cdcr-cluster1/conf/solrconfig.xml
+rename to solr/core/src/test-files/solr/configsets/cdcr-common/conf/solrconfig.xml
+index da548c4c4e..af38ff9d2d 100644
+--- a/solr/core/src/test-files/solr/configsets/cdcr-cluster1/conf/solrconfig.xml
++++ b/solr/core/src/test-files/solr/configsets/cdcr-common/conf/solrconfig.xml
+@@ -42,24 +42,8 @@
+     <processor class="solr.RunUpdateProcessorFactory"/>
+   </updateRequestProcessorChain>
+ 
+-  <requestHandler name="/cdcr" class="solr.CdcrRequestHandler">
+-    <lst name="replica">
+-      <str name="zkHost">${cdcr.cluster2.zkHost}</str>
+-      <str name="source">cdcr-cluster1</str>
+-      <str name="target">cdcr-cluster2</str>
+-    </lst>
+-    <lst name="replicator">
+-      <str name="threadPoolSize">1</str>
+-      <str name="schedule">1000</str>
+-      <str name="batchSize">1000</str>
+-    </lst>
+-    <lst name="updateLogSynchronizer">
+-      <str name="schedule">1000</str>
+-    </lst>
+-  </requestHandler>
+-
+   <updateHandler class="solr.DirectUpdateHandler2">
+-    <updateLog class="solr.CdcrUpdateLog">
++    <updateLog class="solr.UpdateLog">
+       <str name="dir">${solr.ulog.dir:}</str>
+     </updateLog>
+   </updateHandler>
+diff --git a/solr/core/src/test/org/apache/solr/cloud/CdcrConfigStateTest.java b/solr/core/src/test/org/apache/solr/cloud/CdcrConfigStateTest.java
+new file mode 100644
+index 0000000000..c703f57ad8
+--- /dev/null
++++ b/solr/core/src/test/org/apache/solr/cloud/CdcrConfigStateTest.java
+@@ -0,0 +1,254 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.apache.solr.cloud;
++
++import java.io.IOException;
++import java.lang.invoke.MethodHandles;
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Locale;
++import java.util.Map;
++import java.util.concurrent.atomic.AtomicInteger;
++
++import org.apache.lucene.util.LuceneTestCase;
++import org.apache.solr.SolrTestCaseJ4;
++import org.apache.solr.client.solrj.request.CollectionAdminRequest;
++import org.apache.solr.client.solrj.response.CollectionAdminResponse;
++import org.apache.solr.common.cloud.CdcrConfigState;
++import org.apache.solr.common.cloud.CdcrConfigsStateWatcher;
++import org.apache.solr.common.cloud.ZkStateReader;
++import org.apache.solr.common.util.Pair;
++import org.apache.zookeeper.KeeperException;
++import org.junit.Before;
++import org.junit.BeforeClass;
++import org.junit.Test;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++@LuceneTestCase.Slow
++@SolrTestCaseJ4.SuppressSSL
++public class CdcrConfigStateTest extends SolrCloudTestCase {
++  private String collectionName;
++  private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
++
++  @BeforeClass
++  public static void setupClass() throws Exception {
++    Boolean useLegacyCloud = rarely();
++    log.info("Using legacyCloud?: {}", useLegacyCloud);
++
++    configureCluster(4)
++        .withProperty(ZkStateReader.LEGACY_CLOUD, String.valueOf(useLegacyCloud))
++        .addConfig("conf", configset("cloud-minimal"))
++        .configure();
++  }
++
++  @Before
++  @Override
++  public void setUp() throws Exception {
++    super.setUp();
++
++    collectionName = "CdcrPropsTest" + System.nanoTime();
++
++    CollectionAdminRequest.Create request = CollectionAdminRequest.createCollection(collectionName, "conf", 2, 2);
++    CollectionAdminResponse response = request.process(cluster.getSolrClient());
++    assertTrue("Unable to create collection: " + response.toString(), response.isSuccess());
++  }
++
++  @Test
++  public void testSetCdcr() throws InterruptedException, IOException {
++    CdcrConfigState cdcrConfigState = new CdcrConfigState(zkClient());
++
++    List<Pair> cdcrPairs = new ArrayList<>();
++    cdcrPairs.add(new Pair("replica.zkHost","localhost:9999"));
++    cdcrPairs.add(new Pair("replica.target","target_col"));
++    cdcrConfigState.setCdcrConfig(collectionName, cdcrPairs);
++
++    waitForValue("replica","zkHost", "localhost:9999", 5000);
++    waitForValue("replica","target", "target_col", 5000);
++
++    cdcrConfigState.setCdcrConfig(collectionName, "replicator", "schedule", 3000);
++
++    waitForValue("replica","zkHost", "localhost:9999", 5000);
++    waitForValue("replica","target", "target_col", 5000);
++    waitForValue("replicator","schedule", 3000, 5000);
++
++    cdcrConfigState.setCdcrConfig(collectionName, "dummy", "schedule", 3000);
++    try {
++      waitForValue("dummy","zkHost", "localhost:9999", 5000);
++    } catch (AssertionError e) {
++      assertEquals( "Could not see value change after setting collection property. Name: zkHost, current value: null, expected value: localhost:9999", e.getMessage());
++    }
++
++    cdcrPairs = new ArrayList<>();
++    cdcrPairs.add(new Pair("dummy.zkHost","localhost:9999"));
++
++    cdcrConfigState.setCdcrConfig(collectionName, "dummy", "schedule", 3000);
++    try {
++      waitForValue("dummy","schedule", 3000, 5000);
++    } catch (AssertionError e) {
++      assertEquals("", "Could not see value change after setting collection property. Name: schedule, current value: null, expected value: 3000", e.getMessage());
++    }
++  }
++
++  @Test
++  public void testUpdateCdcr() throws InterruptedException, IOException {
++    CdcrConfigState cdcrConfigState = new CdcrConfigState(zkClient());
++
++    Map map =  new LinkedHashMap();
++    map.put("replicator", Collections.singletonMap("schedule",2000L));
++    map.put("updateLogSynchronizer",Collections.singletonMap("schedule",2000L));
++    map.put("replica",Collections.singletonList(Collections.singletonMap("zkHost","localhost:9999")));
++
++    cdcrConfigState.updateCdcrConfig(collectionName, map, false);
++
++    waitForValue("replica","zkHost", "localhost:9999", 5000);
++    waitForValue("updateLogSynchronizer","schedule", 2000L, 5000);
++    waitForValue("replicator","schedule", 2000L, 5000);
++
++  }
++
++  private void waitForValue(String component, String propertyName, Object expectedValue, int timeout) throws InterruptedException {
++    final ZkStateReader zkStateReader = cluster.getSolrClient().getZkStateReader();
++
++    for (int i = 0; i < timeout; i += 10) {
++      Object value = null;
++      Object foundValue = null;
++      value = zkStateReader.getCdcrConfigProperties(collectionName).get(component);
++      if (value != null) {
++        if (component.equals("replica")) {
++          value = ((Map) ((List) value).get(0));
++          foundValue = ((Map) value).get(propertyName);
++        } else {
++          value = (Map) value;
++          foundValue = ((Map) value).get(propertyName);
++        }
++      }
++      if ((expectedValue == null && value == null) ||
++          (expectedValue != null && String.valueOf(expectedValue).equals(String.valueOf(foundValue)))) {
++        return;
++      }
++      Thread.sleep(10);
++    }
++
++    fail(String.format(Locale.ROOT, "Could not see value change after setting collection property. Name: %s, current value: %s, expected value: %s",
++        propertyName, zkStateReader.getCdcrConfigProperties(collectionName).get(component), expectedValue));
++  }
++
++  @Test
++  public void testWatcher() throws KeeperException, InterruptedException, IOException {
++    final ZkStateReader zkStateReader = cluster.getSolrClient().getZkStateReader();
++    CdcrConfigState cdcrConfigState = new CdcrConfigState(zkClient());
++
++    // Add a watcher to cdcr props
++    final Watcher watcher = new Watcher();
++    zkStateReader.registerCdcrConfigPropsWatcher(collectionName, watcher);
++    assertEquals(1, watcher.waitForTrigger());
++
++    // Trigger a new znode event
++    cdcrConfigState.setCdcrConfig(collectionName, "replicator","schedule", 3000L);
++    assertEquals(1, watcher.waitForTrigger());
++    assertEquals(3000L, (((Map)((Map)watcher.getProps()).get("replicator")).get("schedule")));
++
++    // Trigger a value change event
++    cdcrConfigState.setCdcrConfig(collectionName, "replicator","schedule", 6000L);
++    assertEquals(1, watcher.waitForTrigger());
++    assertEquals(6000L, (((Map)((Map)watcher.getProps()).get("replicator")).get("schedule")));
++
++    // Delete the properties znode
++    zkStateReader.getZkClient().delete("/collections/" + collectionName + "/cdcr.json", -1, true);
++    assertEquals(1, watcher.waitForTrigger());
++    System.out.println("props:: " + watcher.getProps());
++    assertTrue(((Map) watcher.getProps()).isEmpty());
++
++    // Remove watcher and make sure that the watcher is not triggered
++    zkStateReader.removeCdcrConfigPropsWatcher(collectionName, watcher);
++    cdcrConfigState.setCdcrConfig(collectionName, "replicator","schedule", 6000L);
++    assertEquals("ZK watcher was triggered after it was removed for collection " + collectionName, 0, watcher.waitForTrigger());
++  }
++
++  @Test
++  public void testMultipleWatchers() throws InterruptedException, IOException {
++    final ZkStateReader zkStateReader = cluster.getSolrClient().getZkStateReader();
++    CdcrConfigState cdcrConfigState = new CdcrConfigState(zkClient());
++
++    // Register the core with ZkStateReader
++    zkStateReader.registerCore(collectionName);
++
++    // Subsequent watchers won't be triggered when adding
++    final Watcher watcher1 = new Watcher();
++    zkStateReader.registerCdcrConfigPropsWatcher(collectionName, watcher1);
++    watcher1.waitForTrigger(); // this might still get triggered because of registerCore
++    final Watcher watcher2 = new Watcher();
++    zkStateReader.registerCdcrConfigPropsWatcher(collectionName, watcher2);
++    assertEquals(0, watcher2.waitForTrigger());
++
++    // Make sure a value change triggers both watchers
++    cdcrConfigState.setCdcrConfig(collectionName, "replicator","schedule", 6000L);
++    assertEquals(1, watcher1.waitForTrigger());
++    assertEquals(1, watcher2.waitForTrigger());
++
++    // The watchers should be triggered when after the core is unregistered
++    zkStateReader.unregisterCore(collectionName);
++    cdcrConfigState.setCdcrConfig(collectionName, "replicator","schedule", 6000L);
++    assertEquals(1, watcher1.waitForTrigger());
++
++    // The watcher should be triggered after another watcher is removed
++    zkStateReader.removeCdcrConfigPropsWatcher(collectionName, watcher2);
++    cdcrConfigState.setCdcrConfig(collectionName, "replicator","schedule", 6000L);
++    assertEquals(1, watcher1.waitForTrigger());
++
++    // The last watcher shouldn't be triggered after removed, even if the core is registered
++    zkStateReader.registerCore(collectionName);
++    zkStateReader.removeCdcrConfigPropsWatcher(collectionName, watcher1);
++    cdcrConfigState.setCdcrConfig(collectionName, "replicator","schedule", 6000L);
++    assertEquals(0, watcher1.waitForTrigger());
++  }
++
++  private class Watcher implements CdcrConfigsStateWatcher {
++    private Object props = null;
++    private AtomicInteger triggered = new AtomicInteger();
++
++    @Override
++    public boolean onStateChanged(Map<String, Object> collectionProperties) {
++      triggered.incrementAndGet();
++      final ZkStateReader zkStateReader = cluster.getSolrClient().getZkStateReader();
++      props = zkStateReader.getCdcrConfigProperties(collectionName);
++      synchronized (this) {
++        notifyAll();
++      }
++      return false;
++    }
++
++    private Object getProps() {
++      return props;
++    }
++
++    private int waitForTrigger() throws InterruptedException {
++      synchronized (this) {
++        if (triggered.get() > 0) {
++          return triggered.getAndSet(0);
++        }
++
++        wait(1000);
++      }
++      return triggered.getAndSet(0);
++    }
++  }
++}
+diff --git a/solr/core/src/test/org/apache/solr/cloud/cdcr/CdcrBidirectionalTest.java b/solr/core/src/test/org/apache/solr/cloud/cdcr/CdcrBidirectionalTest.java
+index 4a7fae4164..609f1862c0 100644
+--- a/solr/core/src/test/org/apache/solr/cloud/cdcr/CdcrBidirectionalTest.java
++++ b/solr/core/src/test/org/apache/solr/cloud/cdcr/CdcrBidirectionalTest.java
+@@ -42,39 +42,49 @@ public class CdcrBidirectionalTest extends SolrTestCaseJ4 {
+   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
+ 
+   @Test
+-  public void testBiDir() throws Exception {
++  public void testBidir() throws Exception {
+     MiniSolrCloudCluster cluster2 = new MiniSolrCloudCluster(1, createTempDir("cdcr-cluster2"), buildJettyConfig("/solr"));
+     cluster2.waitForAllNodes(30);
+     MiniSolrCloudCluster cluster1 = new MiniSolrCloudCluster(1, createTempDir("cdcr-cluster1"), buildJettyConfig("/solr"));
+     cluster1.waitForAllNodes(30);
+     try {
+-      log.info("cluster2 zkHost = " + cluster2.getZkServer().getZkAddress());
+-      System.setProperty("cdcr.cluster2.zkHost", cluster2.getZkServer().getZkAddress());
+ 
++      String cluster2_zkhost = cluster2.getZkServer().getZkAddress();
++      log.info("cluster2 zkHost = " + cluster2.getZkServer().getZkAddress());
++      String cluster1_zkhost = cluster1.getZkServer().getZkAddress();
+       log.info("cluster1 zkHost = " + cluster1.getZkServer().getZkAddress());
+-      System.setProperty("cdcr.cluster1.zkHost", cluster1.getZkServer().getZkAddress());
+-
+ 
+-      cluster1.uploadConfigSet(configset("cdcr-cluster1"), "cdcr-cluster1");
+-      CollectionAdminRequest.createCollection("cdcr-cluster1", "cdcr-cluster1", 2, 1)
++      cluster1.uploadConfigSet(configset("cdcr-common"), "cdcr-common");
++      CollectionAdminRequest.createCollection("cdcr-cluster1", "cdcr-common", 2, 1)
+           .withProperty("solr.directoryFactory", "solr.StandardDirectoryFactory")
++          .setCdcr(true)
+           .setMaxShardsPerNode(2)
+           .process(cluster1.getSolrClient());
+       CloudSolrClient cluster1SolrClient = cluster1.getSolrClient();
+       cluster1SolrClient.setDefaultCollection("cdcr-cluster1");
+ 
+-      cluster2.uploadConfigSet(configset("cdcr-cluster2"), "cdcr-cluster2");
+-      CollectionAdminRequest.createCollection("cdcr-cluster2", "cdcr-cluster2", 2, 1)
++      cluster2.uploadConfigSet(configset("cdcr-common"), "cdcr-common");
++      CollectionAdminRequest.createCollection("cdcr-cluster2", "cdcr-common", 2, 1)
+           .withProperty("solr.directoryFactory", "solr.StandardDirectoryFactory")
++          .setCdcr(true)
+           .setMaxShardsPerNode(2)
+           .process(cluster2.getSolrClient());
+       CloudSolrClient cluster2SolrClient = cluster2.getSolrClient();
+       cluster2SolrClient.setDefaultCollection("cdcr-cluster2");
+ 
++      ModifiableSolrParams params = new ModifiableSolrParams();
++      params.add("name","cdcr-cluster1");
++      params.add("replica.zkHost", cluster2_zkhost);
++      params.add("replica.target", "cdcr-cluster2");
++      params.add("replicator.schedule", "700");
++      params.add("replicator.batchSize", "1024");
++      CdcrTestsUtil.cdcrModifyConfigs(cluster1SolrClient, params);
++      Thread.sleep(3000); //cushion time for collection reload
++
+       UpdateRequest req = null;
+ 
+       CdcrTestsUtil.cdcrStart(cluster1SolrClient);
+-      Thread.sleep(2000);
++      Thread.sleep(2000); //cushion time for smooth Cdcr start
+ 
+       // ADD operation on cluster 1
+       int docs = (TEST_NIGHTLY ? 100 : 10);
+@@ -94,11 +104,19 @@ public class CdcrBidirectionalTest extends SolrTestCaseJ4 {
+ 
+       QueryResponse response = cluster1SolrClient.query(new SolrQuery("*:*"));
+       assertEquals("cluster 1 docs mismatch", numDocs_c1, response.getResults().getNumFound());
+-
+       assertEquals("cluster 2 docs mismatch", numDocs_c1, CdcrTestsUtil.waitForClusterToSync(numDocs_c1, cluster2SolrClient));
+ 
++      params = new ModifiableSolrParams();
++      params.add("name","cdcr-cluster2");
++      params.add("replica.zkHost", cluster1_zkhost);
++      params.add("replica.target", "cdcr-cluster1");
++      params.add("replicator.schedule", "700");
++      params.add("replicator.batchSize", "1024");
++      CdcrTestsUtil.cdcrModifyConfigs(cluster2SolrClient, params);
++      Thread.sleep(3000); //cushion time for collection reload
++
+       CdcrTestsUtil.cdcrStart(cluster2SolrClient); // FULL BI-DIRECTIONAL CDCR FORWARDING ON
+-      Thread.sleep(2000);
++      Thread.sleep(2000); //cushion time for smooth Cdcr start
+ 
+       // ADD operation on cluster 2
+       int numDocs_c2 = 0;
+@@ -119,7 +137,6 @@ public class CdcrBidirectionalTest extends SolrTestCaseJ4 {
+ 
+       response = cluster2SolrClient.query(new SolrQuery("*:*"));
+       assertEquals("cluster 2 docs mismatch", numDocs, response.getResults().getNumFound());
+-
+       assertEquals("cluster 1 docs mismatch", numDocs, CdcrTestsUtil.waitForClusterToSync(numDocs, cluster1SolrClient));
+ 
+       // logging cdcr clusters queue response
+@@ -135,7 +152,7 @@ public class CdcrBidirectionalTest extends SolrTestCaseJ4 {
+       long maxVersion_c2 = Math.min((long)CdcrTestsUtil.getFingerPrintMaxVersion(cluster2SolrClient, "shard1", numDocs),
+           (long)CdcrTestsUtil.getFingerPrintMaxVersion(cluster2SolrClient, "shard2", numDocs));
+ 
+-      ModifiableSolrParams params = new ModifiableSolrParams();
++      params = new ModifiableSolrParams();
+       params.set(CommonParams.ACTION, CdcrParams.CdcrAction.COLLECTIONCHECKPOINT.toString());
+       params.set(CommonParams.QT, "/cdcr");
+       response = cluster2SolrClient.query(params);
+@@ -199,6 +216,34 @@ public class CdcrBidirectionalTest extends SolrTestCaseJ4 {
+       assertEquals("cluster 2 wrong doc", "ABC", response.getResults().get(0).get("abc"));
+       assertEquals("cluster 1 wrong doc", "ABC", getDocFieldValue(cluster1SolrClient, atomicQuery, "ABC"));
+ 
++      params = new ModifiableSolrParams();
++      params.add("name","cdcr-cluster1");
++      params.add("replica.zkHost", cluster2.getZkServer().getZkAddress());
++      params.add("replica.target", "cdcr-cluster2");
++      params.add("replica.remove", "true");
++      CdcrTestsUtil.cdcrModifyConfigs(cluster1SolrClient, params);
++      Thread.sleep(3000); //cushion time for collection reload
++
++      req = new UpdateRequest();
++      doc = new SolrInputDocument();
++      atomicUpdateId = "XYZABCDEF";
++      doc.addField("id", atomicUpdateId);
++      req.add(doc);
++      req.process(cluster1SolrClient);
++      cluster1SolrClient.commit();
++
++      atomicQuery = "id:" + atomicUpdateId;
++      assertEquals("cluster 1 docs mismatch", 1, CdcrTestsUtil.waitForClusterToSync(1, cluster1SolrClient, atomicQuery));
++      assertNotSame("cluster 2 docs mismatch", 1, CdcrTestsUtil.waitForClusterToSync(1, cluster2SolrClient, atomicQuery, 5));
++
++      params = new ModifiableSolrParams();
++      params.add("name","cdcr-cluster1");
++      params.add("replica.zkHost", cluster2.getZkServer().getZkAddress());
++      params.add("replica.target", "cdcr-cluster2");
++      CdcrTestsUtil.cdcrModifyConfigs(cluster1SolrClient, params);
++      Thread.sleep(3000); //cushion time for collection reload
++
++      assertEquals("cluster 1 docs mismatch", 1, CdcrTestsUtil.waitForClusterToSync(1, cluster2SolrClient, atomicQuery));
+ 
+       // logging cdcr clusters queue response
+       response = CdcrTestsUtil.getCdcrQueue(cluster1SolrClient);
+@@ -224,8 +269,10 @@ public class CdcrBidirectionalTest extends SolrTestCaseJ4 {
+     while (System.nanoTime() - start <= TimeUnit.NANOSECONDS.convert(120, TimeUnit.SECONDS)) {
+       clusterSolrClient.commit();
+       response = clusterSolrClient.query(new SolrQuery(query));
+-      if (match.equals(response.getResults().get(0).get("abc"))) {
+-        break;
++      if (response.getResults().get(0) != null) {
++        if (match.equals(response.getResults().get(0).get("abc"))) {
++          break;
++        }
+       }
+       Thread.sleep(1000);
+     }
+diff --git a/solr/core/src/test/org/apache/solr/cloud/cdcr/CdcrTestsUtil.java b/solr/core/src/test/org/apache/solr/cloud/cdcr/CdcrTestsUtil.java
+index 99aa47196e..18c78647ca 100644
+--- a/solr/core/src/test/org/apache/solr/cloud/cdcr/CdcrTestsUtil.java
++++ b/solr/core/src/test/org/apache/solr/cloud/cdcr/CdcrTestsUtil.java
+@@ -24,49 +24,82 @@ import java.util.concurrent.TimeUnit;
+ 
+ import org.apache.solr.SolrTestCaseJ4;
+ import org.apache.solr.client.solrj.SolrQuery;
++import org.apache.solr.client.solrj.SolrRequest;
+ import org.apache.solr.client.solrj.SolrServerException;
+ import org.apache.solr.client.solrj.impl.CloudSolrClient;
++import org.apache.solr.client.solrj.request.QueryRequest;
+ import org.apache.solr.client.solrj.response.QueryResponse;
++import org.apache.solr.common.SolrException;
++import org.apache.solr.common.params.CollectionParams;
+ import org.apache.solr.common.params.CommonParams;
+ import org.apache.solr.common.params.ModifiableSolrParams;
+ import org.apache.solr.common.util.NamedList;
+ import org.apache.solr.handler.CdcrParams;
++import org.apache.solr.handler.CdcrRequestHandler;
+ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
+ 
+ public class CdcrTestsUtil extends SolrTestCaseJ4{
+   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
+ 
+-  protected static void cdcrStart(CloudSolrClient client) throws SolrServerException, IOException {
++  protected static void cdcrStart(CloudSolrClient client) throws SolrServerException, IOException, InterruptedException {
+     QueryResponse response = invokeCdcrAction(client, CdcrParams.CdcrAction.START);
+     assertEquals("started", ((NamedList) response.getResponse().get("status")).get("process"));
+   }
+ 
+-  protected static void cdcrStop(CloudSolrClient client) throws SolrServerException, IOException {
++  protected static void cdcrStop(CloudSolrClient client) throws SolrServerException, IOException, InterruptedException {
+     QueryResponse response = invokeCdcrAction(client, CdcrParams.CdcrAction.STOP);
+     assertEquals("stopped", ((NamedList) response.getResponse().get("status")).get("process"));
+   }
+ 
+-  protected static void cdcrEnableBuffer(CloudSolrClient client) throws IOException, SolrServerException {
++  protected static void cdcrEnableBuffer(CloudSolrClient client) throws IOException, SolrServerException, InterruptedException {
+     QueryResponse response = invokeCdcrAction(client, CdcrParams.CdcrAction.ENABLEBUFFER);
+     assertEquals("enabled", ((NamedList) response.getResponse().get("status")).get("buffer"));
+   }
+ 
+-  protected static void cdcrDisableBuffer(CloudSolrClient client) throws IOException, SolrServerException {
++  protected static void cdcrDisableBuffer(CloudSolrClient client) throws IOException, SolrServerException, InterruptedException {
+     QueryResponse response = invokeCdcrAction(client, CdcrParams.CdcrAction.DISABLEBUFFER);
+     assertEquals("disabled", ((NamedList) response.getResponse().get("status")).get("buffer"));
+   }
+ 
+-  protected static QueryResponse invokeCdcrAction(CloudSolrClient client, CdcrParams.CdcrAction action) throws IOException, SolrServerException {
+-    ModifiableSolrParams params = new ModifiableSolrParams();
+-    params.set(CommonParams.QT, "/cdcr");
++  protected static void cdcrModifyConfigs(CloudSolrClient client, ModifiableSolrParams params) throws IOException, SolrServerException {
++    params.set("action", CollectionParams.CollectionAction.MODIFYCDCR.toString());
++    SolrRequest request = new QueryRequest(params);
++    request.setPath("/admin/collections");
++    NamedList response = client.request(request);
++    assertEquals("success", response.get("message"));
++  }
++
++  protected static QueryResponse invokeCdcrAction(CloudSolrClient client, CdcrParams.CdcrAction action) throws IOException, SolrServerException, InterruptedException {
++    return invokeCdcrAction(client, action, new ModifiableSolrParams());
++  }
++
++  protected static QueryResponse invokeCdcrAction(CloudSolrClient client, CdcrParams.CdcrAction action, ModifiableSolrParams params) throws IOException, SolrServerException, InterruptedException {
++    return invokeCdcrAction(client, action, params, 3);
++  }
++
++  protected static QueryResponse invokeCdcrAction(CloudSolrClient client, CdcrParams.CdcrAction action, ModifiableSolrParams params, int maxRetires) throws IOException, SolrServerException, InterruptedException {
++    params.set(CommonParams.QT, CdcrRequestHandler.HANDLER_PATH);
+     params.set(CommonParams.ACTION, action.toLower());
+-    return client.query(params);
++    QueryResponse response =  null;
++    try {
++      response = client.query(params);
++    } catch (SolrException e) {
++      if (--maxRetires != 0) {
++        if (e.code() == SolrException.ErrorCode.NOT_FOUND.code) {
++          Thread.sleep(1000);
++          response = invokeCdcrAction(client, action, params, maxRetires);
++        }
++      } else {
++        throw e;
++      }
++    }
++    return response;
+   }
+ 
+   protected static QueryResponse getCdcrQueue(CloudSolrClient client) throws SolrServerException, IOException {
+     ModifiableSolrParams params = new ModifiableSolrParams();
+-    params.set(CommonParams.QT, "/cdcr");
++    params.set(CommonParams.QT, CdcrRequestHandler.HANDLER_PATH);
+     params.set(CommonParams.ACTION, CdcrParams.QUEUES);
+     return client.query(params);
+   }
+@@ -108,4 +141,18 @@ public class CdcrTestsUtil extends SolrTestCaseJ4{
+     }
+     return response != null ? response.getResults().getNumFound() : 0;
+   }
++
++  protected static long waitForClusterToSync(int numDocs, CloudSolrClient clusterSolrClient, String query, int duration) throws Exception {
++    long start = System.nanoTime();
++    QueryResponse response = null;
++    while (System.nanoTime() - start <= TimeUnit.NANOSECONDS.convert(duration, TimeUnit.SECONDS)) {
++      clusterSolrClient.commit();
++      response = clusterSolrClient.query(new SolrQuery(query));
++      if (response.getResults().getNumFound() == numDocs) {
++        break;
++      }
++      Thread.sleep(1000);
++    }
++    return response != null ? response.getResults().getNumFound() : 0;
++  }
+ }
+diff --git a/solr/solrj/src/java/org/apache/solr/client/solrj/request/CollectionAdminRequest.java b/solr/solrj/src/java/org/apache/solr/client/solrj/request/CollectionAdminRequest.java
+index edc5a8be1c..54fc45333e 100644
+--- a/solr/solrj/src/java/org/apache/solr/client/solrj/request/CollectionAdminRequest.java
++++ b/solr/solrj/src/java/org/apache/solr/client/solrj/request/CollectionAdminRequest.java
+@@ -390,6 +390,8 @@ public abstract class CollectionAdminRequest<T extends CollectionAdminResponse>
+     protected Integer stateFormat;
+     private String[] rule , snitch;
+ 
++    private boolean isCdcr = false;
++
+     /** Constructor intended for typical use cases */
+     protected Create(String collection, String config, Integer numShards, Integer numNrtReplicas, Integer numTlogReplicas, Integer numPullReplicas) { // TODO: maybe add other constructors
+       this(collection, config, null, numShards, null, numNrtReplicas, numTlogReplicas, numPullReplicas);
+@@ -525,6 +527,7 @@ public abstract class CollectionAdminRequest<T extends CollectionAdminResponse>
+       }
+       if(rule != null) params.set("rule", rule);
+       if(snitch != null) params.set("snitch", snitch);
++      if(isCdcr) params.set("cdcr",isCdcr);
+       params.setNonNull(POLICY, policy);
+       return params;
+     }
+@@ -533,6 +536,11 @@ public abstract class CollectionAdminRequest<T extends CollectionAdminResponse>
+       this.policy = policy;
+       return this;
+     }
++
++    public Create setCdcr(boolean isCdcr) {
++      this.isCdcr = isCdcr;
++      return this;
++    }
+   }
+ 
+   /**
+diff --git a/solr/solrj/src/java/org/apache/solr/common/cloud/CdcrConfigState.java b/solr/solrj/src/java/org/apache/solr/common/cloud/CdcrConfigState.java
+new file mode 100644
+index 0000000000..3551952379
+--- /dev/null
++++ b/solr/solrj/src/java/org/apache/solr/common/cloud/CdcrConfigState.java
+@@ -0,0 +1,207 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.apache.solr.common.cloud;
++
++import java.io.IOException;
++import java.lang.invoke.MethodHandles;
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++
++import org.apache.solr.common.util.Pair;
++import org.apache.solr.common.util.Utils;
++import org.apache.zookeeper.CreateMode;
++import org.apache.zookeeper.KeeperException;
++import org.apache.zookeeper.data.Stat;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++/**
++ * Interact with solr cdcr config properties
++ * <p>
++ * Note that all methods on this class make calls to ZK on every invocation.  For
++ * read-only eventually-consistent uses, clients should instead call
++ * {@link ZkStateReader#getCdcrConfigProperties(String)}
++ */
++public class CdcrConfigState {
++
++  private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
++
++  private final SolrZkClient client;
++
++  public static final List<String> CDCR_PREFIXES = new ArrayList<String>() {{
++    add("buffer");
++    add("replica");
++    add("replicator");
++    add("updateLogSynchronizer");
++  }};
++
++  /**
++   * Creates a CdcrConfigState object using a provided SolrZkClient
++   */
++  public CdcrConfigState(SolrZkClient client) {
++    this.client = client;
++  }
++
++  /**
++   * Read the value of a collection property, returning a default if it is not set
++   *
++   * @param key          the property name
++   * @param defaultValue the default value
++   * @return the property value
++   * @throws IOException if there is an error reading the value from zookeeper
++   */
++  @SuppressWarnings("unchecked")
++  public Object getCdcrConfigProperty(String collection, java.lang.String key, Object defaultValue) throws IOException {
++    Object value = getCdcrConfigProperties(collection).get(key);
++    if (value == null)
++      return defaultValue;
++    return value;
++  }
++
++  /**
++   * Return the collection properties
++   *
++   * @throws IOException if there is an error reading properties from zookeeper
++   */
++  @SuppressWarnings("unchecked")
++  public Map<String, Object> getCdcrConfigProperties(String collection) throws IOException {
++    try {
++      return (Map<String, Object>) Utils.fromJSON(client.getData(ZkStateReader.getCdcrConfigPropsPath(collection), null, new Stat(), true));
++    } catch (KeeperException.NoNodeException e) {
++      return new LinkedHashMap<>();
++    } catch (KeeperException | InterruptedException e) {
++      throw new IOException("Error reading properties for collection " + collection, SolrZkClient.checkInterrupted(e));
++    }
++  }
++
++  /**
++   * This method sets a collection property.
++   *
++   * @param collection  collection.
++   * @param component  component.
++   * @param propertyName  propertyName.
++   * @param propertyVal  propertyVal.
++   * @throws IOException if there is an error writing data to zookeeper
++   */
++  @SuppressWarnings("unchecked")
++  public void setCdcrConfig(String collection, String component, String propertyName, Object propertyVal) throws IOException {
++    setCdcrConfig(collection, Collections.singletonList(new Pair(component + "." + propertyName, propertyVal)));
++  }
++
++  /**
++   * This method sets a collection property.
++   *
++   * @param collection The property name to be set.
++   * @param cdcrProps  The property name to be set.
++   * @throws IOException if there is an error writing data to zookeeper
++   */
++  @SuppressWarnings("unchecked")
++  public void setCdcrConfig(String collection, List<Pair> cdcrProps) throws IOException {
++    String znodePath = ZkStateReader.getCdcrConfigPropsPath(collection);
++
++    for (; ; ) {
++      Stat s = new Stat();
++      try {
++        Map properties = null;
++        boolean ifZNodeExists = client.exists(znodePath, true);
++        if (ifZNodeExists) {
++          properties = (Map) Utils.fromJSON(client.getData(znodePath, null, s, true));
++        } else {
++          properties = new LinkedHashMap();
++        }
++        for (Pair pair : cdcrProps) {
++          String[] keys = pair.first().toString().replace(".", "_").split("_"); //TODO find a better way
++          // validate the parameters ...... // sanity check // TODO important
++          if (!CDCR_PREFIXES.contains(keys[0])) {
++            log.warn("'" + keys[0] + "' is not a valid cdcr component and will be ignored");
++            continue;
++          }
++
++          if (properties.get(keys[0]) != null) {
++            Map childProperties = (Map<String, Object>) properties.get(keys[0]);
++            childProperties.put(keys[1], pair.second());
++          } else {
++            Map childProperties = new LinkedHashMap();
++            childProperties.put(keys[1], pair.second());
++            properties.put(keys[0], childProperties);
++          }
++        }
++
++        if (properties.get("replica") != null && !(properties.get("replica") instanceof List)) {
++          properties.put("replica", Collections.singletonList(properties.get("replica")));
++        }
++
++        if (ifZNodeExists) {
++          client.setData(znodePath, Utils.toJSON(properties), s.getVersion(), true);
++        } else {
++          client.create(znodePath, Utils.toJSON(properties), CreateMode.PERSISTENT, true);
++        }
++      } catch (KeeperException.BadVersionException | KeeperException.NodeExistsException e) {
++        //race condition
++        continue;
++      } catch (InterruptedException | KeeperException e) {
++        throw new IOException("Error setting CDCR property for collection " + collection, SolrZkClient.checkInterrupted(e));
++      }
++      break;
++    }
++  }
++
++  public void updateCdcrConfig(String collection, Map updatedProps, boolean overwrite) throws IOException {
++    String znodePath = ZkStateReader.getCdcrConfigPropsPath(collection);
++
++    for (; ; ) {
++      Stat s = new Stat();
++      try {
++        Map properties = null;
++        boolean ifZNodeExists = client.exists(znodePath, true);
++        if (ifZNodeExists) {
++          properties = (Map) Utils.fromJSON(client.getData(znodePath, null, s, true));
++        } else {
++          properties = new LinkedHashMap();
++        }
++
++        if (overwrite) {
++          properties.clear();
++        }
++        properties.putAll(updatedProps);
++
++
++        if (client.exists(znodePath, true)) {
++          client.setData(znodePath, Utils.toJSON(properties), s.getVersion(), true);
++        } else {
++          client.create(znodePath, Utils.toJSON(properties), CreateMode.PERSISTENT, true);
++        }
++      } catch (KeeperException.BadVersionException | KeeperException.NodeExistsException e) {
++        //race condition
++        continue;
++      } catch (InterruptedException | KeeperException e) {
++        throw new IOException("Error updating CDCR config properties for collection " + collection, SolrZkClient.checkInterrupted(e));
++      }
++      break;
++    }
++  }
++
++  public static boolean isCdcrConfiguredForColl(String collection, SolrZkClient client) throws InterruptedException, KeeperException {
++    String znodePath = ZkStateReader.getCdcrConfigPropsPath(collection);
++    return client.exists(znodePath, true);
++  }
++
++}
+diff --git a/solr/solrj/src/java/org/apache/solr/common/cloud/CdcrConfigsStateWatcher.java b/solr/solrj/src/java/org/apache/solr/common/cloud/CdcrConfigsStateWatcher.java
+new file mode 100644
+index 0000000000..24edfa8e89
+--- /dev/null
++++ b/solr/solrj/src/java/org/apache/solr/common/cloud/CdcrConfigsStateWatcher.java
+@@ -0,0 +1,40 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.apache.solr.common.cloud;
++
++import java.util.Map;
++
++/**
++ * Callback registered with {@link ZkStateReader#registerCdcrConfigPropsWatcher(String, CdcrConfigsStateWatcher)}
++ * and called whenever the cdcr properties change.
++ */
++public interface CdcrConfigsStateWatcher {
++
++  /**
++   * Called when the cdcr config properties we are registered against has a change of state
++   *
++   * Note that, due to the way Zookeeper watchers are implemented, a single call may be
++   * the result of several state changes
++   *
++   * @param cdcrConfigProps the new cdcr properties
++   *
++   * @return true if the watcher should be removed
++   */
++  boolean onStateChanged(Map<String, Object> cdcrConfigProps);
++
++}
+diff --git a/solr/solrj/src/java/org/apache/solr/common/cloud/ZkStateReader.java b/solr/solrj/src/java/org/apache/solr/common/cloud/ZkStateReader.java
+index 8ab7ecbca5..16c5f75727 100644
+--- a/solr/solrj/src/java/org/apache/solr/common/cloud/ZkStateReader.java
++++ b/solr/solrj/src/java/org/apache/solr/common/cloud/ZkStateReader.java
+@@ -91,6 +91,7 @@ public class ZkStateReader implements Closeable {
+   public static final String SHARED_STORAGE_PROP = "shared_storage";
+   public static final String PROPERTY_PROP = "property";
+   public static final String PROPERTY_PROP_PREFIX = "property.";
++  public static final String CDCR_PREFIX = "cdcr.";
+   public static final String PROPERTY_VALUE_PROP = "property.value";
+   public static final String MAX_AT_ONCE_PROP = "maxAtOnce";
+   public static final String MAX_WAIT_SECONDS_PROP = "maxWaitSeconds";
+@@ -99,6 +100,7 @@ public class ZkStateReader implements Closeable {
+   public static final String ALIASES = "/aliases.json";
+   public static final String CLUSTER_STATE = "/clusterstate.json";
+   public static final String CLUSTER_PROPS = "/clusterprops.json";
++  public static final String CDCR_CONFIG_PROPS_ZKNODE = "cdcr.json";
+   public static final String REJOIN_AT_HEAD_PROP = "rejoinAtHead";
+   public static final String SOLR_SECURITY_CONF_PATH = "/security.json";
+   public static final String SOLR_AUTOSCALING_CONF_PATH = "/autoscaling.json";
+@@ -149,6 +151,9 @@ public class ZkStateReader implements Closeable {
+   /** Collections with format2 state.json, not "interesting" and not actively watched. */
+   private final ConcurrentHashMap<String, LazyCollectionRef> lazyCollectionStates = new ConcurrentHashMap<>();
+ 
++  /** Collection properties being actively watched */
++  private final ConcurrentHashMap<String, Map<String, Object>> watchedCdcrConfigProps = new ConcurrentHashMap<>();
++
+   private volatile SortedSet<String> liveNodes = emptySortedSet();
+ 
+   private volatile Map<String, Object> clusterProperties = Collections.emptyMap();
+@@ -159,7 +164,9 @@ public class ZkStateReader implements Closeable {
+ 
+   private final Runnable securityNodeListener;
+ 
+-  private ConcurrentHashMap<String, CollectionWatch> collectionWatches = new ConcurrentHashMap<>();
++  private ConcurrentHashMap<String, CollectionWatch<CollectionStateWatcher>> collectionWatches = new ConcurrentHashMap<>();
++
++  private ConcurrentHashMap<String, CollectionWatch<CdcrConfigsStateWatcher>> cdcrConfigPropsWatches = new ConcurrentHashMap<>();
+ 
+   private final ExecutorService notifications = ExecutorUtil.newMDCAwareCachedThreadPool("watches");
+ 
+@@ -194,10 +201,10 @@ public class ZkStateReader implements Closeable {
+     return new AutoScalingConfig(map);
+   }
+ 
+-  private static class CollectionWatch {
++  private static class CollectionWatch <T> {
+ 
+     int coreRefCount = 0;
+-    Set<CollectionStateWatcher> stateWatchers = ConcurrentHashMap.newKeySet();
++    Set<T> stateWatchers = ConcurrentHashMap.newKeySet();
+ 
+     public boolean canBeRemoved() {
+       return coreRefCount + stateWatchers.size() == 0;
+@@ -915,6 +922,48 @@ public class ZkStateReader implements Closeable {
+     }
+   }
+ 
++  public Map<String, Object> getCdcrConfigProperties(final String collection) {
++    Map<String, Object> properties = watchedCdcrConfigProps.get(collection);
++    if (properties == null) {
++      try {
++        properties = fetchCdcrConfigProperties(collection, null);
++      } catch (Exception e) {
++        throw new SolrException(ErrorCode.SERVER_ERROR, "Error reading collection properties", e);
++      }
++    }
++
++    return properties;
++  }
++
++  static String getCdcrConfigPropsPath(final String collection) {
++    return COLLECTIONS_ZKNODE + '/' + collection + '/' + CDCR_CONFIG_PROPS_ZKNODE;
++  }
++
++  @SuppressWarnings("unchecked")
++  private Map<String, Object> fetchCdcrConfigProperties(String collection, Watcher watcher) throws KeeperException, InterruptedException {
++    final String znodePath = getCdcrConfigPropsPath(collection);
++    while (true) {
++      try {
++        Stat stat = new Stat();
++        byte[] data = zkClient.getData(znodePath, watcher, stat, true);
++        return (Map<String, Object>) Utils.fromJSON(data);
++      } catch (ClassCastException e) {
++        throw new SolrException(ErrorCode.SERVER_ERROR, "Unable to parse cdcr properties for collection " + collection, e);
++      } catch (KeeperException.NoNodeException e) {
++        if (watcher != null) {
++          // Leave an exists watch in place in case a cdcr.json is created later.
++          Stat exists = zkClient.exists(znodePath, watcher, true);
++          if (exists != null) {
++            // Rare race condition, we tried to fetch the data and couldn't find it, then we found it exists.
++            // Loop and try again.
++            continue;
++          }
++        }
++        return Collections.emptyMap();
++      }
++    }
++  }
++
+   /**
+    * Returns the content of /security.json from ZooKeeper as a Map
+    * If the files doesn't exist, it returns null.
+@@ -1039,6 +1088,56 @@ public class ZkStateReader implements Closeable {
+     }
+   }
+ 
++  /** Watches cdcr properties */
++  class CdcrConfigWatcher implements Watcher {
++    private final String coll;
++
++    CdcrConfigWatcher(String coll) {
++      this.coll = coll;
++    }
++
++    @Override
++    public void process(WatchedEvent event) {
++      // session events are not change events, and do not remove the watcher
++      if (EventType.None.equals(event.getType())) {
++        return;
++      }
++
++      if (!cdcrConfigPropsWatches.containsKey(coll)) {
++        // No one can be notified of the change, we can ignore it and "unset" the watch
++        LOG.debug("Ignoring property change for collection {}", coll);
++        return;
++      }
++
++      LOG.info("A cdcr config property change: [{}] for collection [{}] has occurred - updating...",
++          event, coll);
++
++      refreshAndWatch();
++    }
++
++    /**
++     * Refresh collection properties from ZK and leave a watch for future changes. Updates the properties in
++     * watchedCdcrConfigProps with the results of the refresh.
++     */
++    void refreshAndWatch() {
++      try {
++        Map<String, Object> properties = fetchCdcrConfigProperties(coll, this);
++        watchedCdcrConfigProps.put(coll, properties);
++        synchronized (getUpdateLock()) {
++          notifyCdcrConfigPropsWatchers(coll, properties);
++        }
++      } catch (KeeperException.SessionExpiredException | KeeperException.ConnectionLossException e) {
++        LOG.warn("ZooKeeper watch triggered, but Solr cannot talk to ZK: [{}]", e.getMessage());
++      } catch (KeeperException e) {
++        LOG.error("Unwatched collection: [{}]", coll, e);
++        throw new ZooKeeperException(ErrorCode.SERVER_ERROR, "A ZK error has occurred", e);
++      } catch (InterruptedException e) {
++        Thread.currentThread().interrupt();
++        LOG.error("Unwatched collection: [{}]", coll, e);
++      }
++    }
++  }
++
+   /** Watches /collections children . */
+   class CollectionsChildWatcher implements Watcher {
+ 
+@@ -1163,7 +1262,7 @@ public class ZkStateReader implements Closeable {
+     collectionWatches.compute(collection, (k, v) -> {
+       if (v == null) {
+         reconstructState.set(true);
+-        v = new CollectionWatch();
++        v = new CollectionWatch<>();
+       }
+       v.coreRefCount++;
+       return v;
+@@ -1171,6 +1270,21 @@ public class ZkStateReader implements Closeable {
+     if (reconstructState.get()) {
+       new StateWatcher(collection).refreshAndWatch();
+     }
++
++
++    AtomicBoolean addPropsWatch = new AtomicBoolean(false);
++    cdcrConfigPropsWatches.compute(collection, (k, v) -> {
++      if (v == null) {
++        addPropsWatch.set(true);
++        v = new CollectionWatch<>();
++      }
++      v.coreRefCount++;
++      return v;
++    });
++
++    if (addPropsWatch.get()) {
++      new CdcrConfigWatcher(collection).refreshAndWatch();
++    }
+   }
+ 
+   /**
+@@ -1203,6 +1317,18 @@ public class ZkStateReader implements Closeable {
+         constructState(Collections.emptySet());
+       }
+     }
++
++    cdcrConfigPropsWatches.compute(collection, (k, v) -> {
++      if (v == null)
++        return null;
++      if (v.coreRefCount > 0)
++        v.coreRefCount--;
++      if (v.canBeRemoved()) {
++        watchedCdcrConfigProps.remove(collection);
++        return null;
++      }
++      return v;
++    });
+   }
+ 
+   /**
+@@ -1212,7 +1338,7 @@ public class ZkStateReader implements Closeable {
+     AtomicBoolean watchSet = new AtomicBoolean(false);
+     collectionWatches.compute(collection, (k, v) -> {
+       if (v == null) {
+-        v = new CollectionWatch();
++        v = new CollectionWatch<>();
+         watchSet.set(true);
+       }
+       v.stateWatchers.add(stateWatcher);
+@@ -1354,6 +1480,34 @@ public class ZkStateReader implements Closeable {
+     return updated;
+   }
+ 
++  public void registerCdcrConfigPropsWatcher(final String collection, CdcrConfigsStateWatcher propsWatcher) {
++    AtomicBoolean watchSet = new AtomicBoolean(false);
++    cdcrConfigPropsWatches.compute(collection, (k, v) -> {
++      if (v == null) {
++        v = new CollectionWatch<>();
++        watchSet.set(true);
++      }
++      v.stateWatchers.add(propsWatcher);
++      return v;
++    });
++
++    if (watchSet.get()) {
++      new CdcrConfigWatcher(collection).refreshAndWatch();
++    }
++  }
++
++  public void removeCdcrConfigPropsWatcher(String collection, CdcrConfigsStateWatcher watcher) {
++    cdcrConfigPropsWatches.compute(collection, (k, v) -> {
++      if (v == null)
++        return null;
++      v.stateWatchers.remove(watcher);
++      if (v.canBeRemoved())
++        return null;
++      return v;
++    });
++  }
++
++
+   public static class ConfigData {
+     public Map<String, Object> data;
+     public int version;
+@@ -1562,4 +1716,43 @@ public class ZkStateReader implements Closeable {
+ 
+   }
+ 
++  private void notifyCdcrConfigPropsWatchers(String collection, Map<String, Object> properties) {
++    try {
++      notifications.submit(new CdcrConfigNotification(collection, properties));
++    }
++    catch (RejectedExecutionException e) {
++      if (!closed) {
++        LOG.error("Couldn't run cdcr config notifications for {}", collection, e);
++      }
++    }
++  }
++
++  private class CdcrConfigNotification implements Runnable {
++
++    final String collection;
++    final Map<String, Object> cdcrConfigProperties;
++
++    private CdcrConfigNotification(String collection, Map<String, Object> cdcrConfigProperties) {
++      this.collection = collection;
++      this.cdcrConfigProperties = cdcrConfigProperties;
++    }
++
++    @Override
++    public void run() {
++      List<CdcrConfigsStateWatcher> watchers = new ArrayList<>();
++      cdcrConfigPropsWatches.compute(collection, (k, v) -> {
++        if (v == null)
++          return null;
++        watchers.addAll(v.stateWatchers);
++        return v;
++      });
++      for (CdcrConfigsStateWatcher watcher : watchers) {
++        if (watcher.onStateChanged(cdcrConfigProperties)) {
++          removeCdcrConfigPropsWatcher(collection, watcher);
++        }
++      }
++    }
++
++  }
++
+ }
+diff --git a/solr/solrj/src/java/org/apache/solr/common/params/CollectionParams.java b/solr/solrj/src/java/org/apache/solr/common/params/CollectionParams.java
+index 9d5fc36bb6..23f091e392 100644
+--- a/solr/solrj/src/java/org/apache/solr/common/params/CollectionParams.java
++++ b/solr/solrj/src/java/org/apache/solr/common/params/CollectionParams.java
+@@ -107,6 +107,7 @@ public interface CollectionParams {
+     DELETESNAPSHOT(true, LockLevel.COLLECTION),
+     LISTSNAPSHOTS(false, LockLevel.NONE),
+     UTILIZENODE(false, LockLevel.NONE),
++    MODIFYCDCR(true, LockLevel.COLLECTION),
+     //only for testing. it just waits for specified time
+     // these are not exposed via collection API commands
+     // but the overseer is aware of these tasks

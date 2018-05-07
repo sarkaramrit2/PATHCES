@@ -1,0 +1,382 @@
+diff --git a/solr/core/src/java/org/apache/solr/handler/CdcrBufferStateManager.java b/solr/core/src/java/org/apache/solr/handler/CdcrBufferStateManager.java
+index fd8d4bb566..fc944b267f 100644
+--- a/solr/core/src/java/org/apache/solr/handler/CdcrBufferStateManager.java
++++ b/solr/core/src/java/org/apache/solr/handler/CdcrBufferStateManager.java
+@@ -42,7 +42,7 @@ class CdcrBufferStateManager extends CdcrStateManager {
+ 
+   private SolrCore core;
+ 
+-  static CdcrParams.BufferState DEFAULT_STATE = CdcrParams.BufferState.ENABLED;
++  static CdcrParams.BufferState DEFAULT_STATE = CdcrParams.BufferState.DISABLED;
+ 
+   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
+ 
+diff --git a/solr/core/src/java/org/apache/solr/handler/CdcrRequestHandler.java b/solr/core/src/java/org/apache/solr/handler/CdcrRequestHandler.java
+index 430237e5c8..876522603f 100644
+--- a/solr/core/src/java/org/apache/solr/handler/CdcrRequestHandler.java
++++ b/solr/core/src/java/org/apache/solr/handler/CdcrRequestHandler.java
+@@ -461,6 +461,7 @@ public class CdcrRequestHandler extends RequestHandlerBase implements SolrCoreAw
+     }
+   }
+ 
++  @Deprecated
+   private void handleEnableBufferAction(SolrQueryRequest req, SolrQueryResponse rsp) {
+     if (bufferStateManager.getState() == CdcrParams.BufferState.DISABLED) {
+       bufferStateManager.setState(CdcrParams.BufferState.ENABLED);
+@@ -468,8 +469,10 @@ public class CdcrRequestHandler extends RequestHandlerBase implements SolrCoreAw
+     }
+ 
+     rsp.add(CdcrParams.CdcrAction.STATUS.toLower(), this.getStatus());
++    rsp.add("warning","This API has been deprecated");
+   }
+ 
++  @Deprecated
+   private void handleDisableBufferAction(SolrQueryRequest req, SolrQueryResponse rsp) {
+     if (bufferStateManager.getState() == CdcrParams.BufferState.ENABLED) {
+       bufferStateManager.setState(CdcrParams.BufferState.DISABLED);
+@@ -477,6 +480,7 @@ public class CdcrRequestHandler extends RequestHandlerBase implements SolrCoreAw
+     }
+ 
+     rsp.add(CdcrParams.CdcrAction.STATUS.toLower(), this.getStatus());
++    rsp.add("warning","This API has been deprecated");
+   }
+ 
+   /**
+diff --git a/solr/core/src/test/org/apache/solr/cloud/cdcr/CdcrReplicationHandlerTest.java b/solr/core/src/test/org/apache/solr/cloud/cdcr/CdcrReplicationHandlerTest.java
+index 65826c4c21..54beaf39fe 100644
+--- a/solr/core/src/test/org/apache/solr/cloud/cdcr/CdcrReplicationHandlerTest.java
++++ b/solr/core/src/test/org/apache/solr/cloud/cdcr/CdcrReplicationHandlerTest.java
+@@ -35,6 +35,7 @@ import org.apache.solr.client.solrj.SolrServerException;
+ import org.apache.solr.client.solrj.impl.CloudSolrClient;
+ import org.apache.solr.cloud.ChaosMonkey;
+ import org.apache.solr.common.SolrInputDocument;
++import org.apache.solr.handler.CdcrParams;
+ import org.apache.solr.util.DefaultSolrThreadFactory;
+ import org.junit.Test;
+ import org.slf4j.Logger;
+@@ -61,7 +62,7 @@ public class CdcrReplicationHandlerTest extends BaseCdcrDistributedZkTest {
+ 
+   /**
+    * Test the scenario where the slave is killed from the start. The replication
+-   * strategy should fetch all the missing tlog files from the leader.
++   * strategy should fetch all the missing docs or entire index from the leader.
+    */
+   @Test
+   @ShardsFixed(num = 2)
+@@ -82,12 +83,14 @@ public class CdcrReplicationHandlerTest extends BaseCdcrDistributedZkTest {
+     // Restart the slave node to trigger Replication strategy
+     this.restartServer(slaves.get(0));
+ 
+-    this.assertUpdateLogsEquals(SOURCE_COLLECTION, 10);
++    // follower restarted and replication strategy should copy all docs from leader
++    assertNumDocs(100, slaves.get(0));
++
+   }
+ 
+   /**
+    * Test the scenario where the slave is killed before receiving all the documents. The replication
+-   * strategy should fetch all the missing tlog files from the leader.
++   * strategy should fetch all missing docs or entire index from the leader
+    */
+   @Test
+   @ShardsFixed(num = 2)
+@@ -116,14 +119,13 @@ public class CdcrReplicationHandlerTest extends BaseCdcrDistributedZkTest {
+     // Restart the slave node to trigger Replication strategy
+     this.restartServer(slaves.get(0));
+ 
+-    // at this stage, the slave should have replicated the 5 missing tlog files
+-    this.assertUpdateLogsEquals(SOURCE_COLLECTION, 10);
++    // follower restarted and replication strategy should copy all docs from leader
++    assertNumDocs(200, slaves.get(0));
+   }
+ 
+   /**
+    * Test the scenario where the slave is killed before receiving a commit. This creates a truncated tlog
+-   * file on the slave node. The replication strategy should detect this truncated file, and fetch the
+-   * non-truncated file from the leader.
++   * file on the slave node. The replication strategy should missing docs or entire index from the leader
+    */
+   @Test
+   @ShardsFixed(num = 2)
+@@ -153,15 +155,14 @@ public class CdcrReplicationHandlerTest extends BaseCdcrDistributedZkTest {
+     // Restart the slave node to trigger Replication recovery
+     this.restartServer(slaves.get(0));
+ 
+-    // at this stage, the slave should have replicated the 5 missing tlog files
+-    this.assertUpdateLogsEquals(SOURCE_COLLECTION, 10);
++    // follower restarted and replication strategy should copy all docs from leader
++    assertNumDocs(200, slaves.get(0));
+   }
+ 
+   /**
+    * Test the scenario where the slave first recovered with a PeerSync strategy, then with a Replication strategy.
+    * The PeerSync strategy will generate a single tlog file for all the missing updates on the slave node.
+-   * If a Replication strategy occurs at a later stage, it should remove this tlog file generated by PeerSync
+-   * and fetch the corresponding tlog files from the leader.
++   * If a Replication strategy occurs at a later stage, it will fetch missing docs or entire index from the leader
+    */
+   @Test
+   @ShardsFixed(num = 2)
+@@ -204,19 +205,23 @@ public class CdcrReplicationHandlerTest extends BaseCdcrDistributedZkTest {
+     // restart the slave node to trigger Replication recovery
+     this.restartServer(slaves.get(0));
+ 
+-    // at this stage, the slave should have replicated the 5 missing tlog files
+-    this.assertUpdateLogsEquals(SOURCE_COLLECTION, 15);
++    // follower restarted and replication strategy should copy all docs from leader
++    assertNumDocs(200, slaves.get(0));
++
+   }
+ 
+   /**
+-   * Test the scenario where the slave is killed while the leader is still receiving updates.
++   * Test the scenario when BUFFER is ENABLED where the slave is killed while the leader is still receiving updates.
+    * The slave should buffer updates while in recovery, then replay them at the end of the recovery.
+    * If updates were properly buffered and replayed, then the slave should have the same number of documents
+    * than the leader. This checks if cdcr tlog replication interferes with buffered updates - SOLR-8263.
+    */
+   @Test
+   @ShardsFixed(num = 2)
+-  public void testReplicationWithBufferedUpdates() throws Exception {
++  public void testReplicationWithBufferedUpdates() throws Exception {  // test specifically when buffer enabled
++
++    invokeCdcrAction(this.getShardToSlaveJetty(SOURCE_COLLECTION, SHARD1).get(0), CdcrParams.CdcrAction.ENABLEBUFFER);
++
+     List<CloudJettyRunner> slaves = this.getShardToSlaveJetty(SOURCE_COLLECTION, SHARD1);
+ 
+     AtomicInteger numDocs = new AtomicInteger(0);
+@@ -237,6 +242,36 @@ public class CdcrReplicationHandlerTest extends BaseCdcrDistributedZkTest {
+     assertNumDocs(numDocs.get(), slaves.get(0));
+   }
+ 
++  /**
++   * Test the scenario where the slave is killed from the start. The replication
++   * strategy should fetch all the missing tlog files from the leader when
++   * buffer is enabled
++   */
++  @Test
++  @ShardsFixed(num = 2)
++  public void testFullReplicationWithBufferEnabled() throws Exception {
++
++    invokeCdcrAction(this.getShardToSlaveJetty(SOURCE_COLLECTION, SHARD1).get(0), CdcrParams.CdcrAction.ENABLEBUFFER);
++
++    List<CloudJettyRunner> slaves = this.getShardToSlaveJetty(SOURCE_COLLECTION, SHARD1);
++    ChaosMonkey.stop(slaves.get(0).jetty);
++
++    for (int i = 0; i < 10; i++) {
++      List<SolrInputDocument> docs = new ArrayList<>();
++      for (int j = i * 10; j < (i * 10) + 10; j++) {
++        docs.add(getDoc(id, Integer.toString(j)));
++      }
++      index(SOURCE_COLLECTION, docs);
++    }
++
++    assertNumDocs(100, SOURCE_COLLECTION);
++
++    // Restart the slave node to trigger Replication strategy
++    this.restartServer(slaves.get(0));
++
++    this.assertUpdateLogsEquals(SOURCE_COLLECTION, 10);
++  }
++
+   private void assertNumDocs(int expectedNumDocs, CloudJettyRunner jetty)
+   throws InterruptedException, IOException, SolrServerException {
+     SolrClient client = createNewSolrServer(jetty.url);
+@@ -328,4 +363,4 @@ public class CdcrReplicationHandlerTest extends BaseCdcrDistributedZkTest {
+     return filesMeta;
+   }
+ 
+-}
++}
+\ No newline at end of file
+diff --git a/solr/core/src/test/org/apache/solr/cloud/cdcr/CdcrRequestHandlerTest.java b/solr/core/src/test/org/apache/solr/cloud/cdcr/CdcrRequestHandlerTest.java
+index e12c693e60..c5f678bff2 100644
+--- a/solr/core/src/test/org/apache/solr/cloud/cdcr/CdcrRequestHandlerTest.java
++++ b/solr/core/src/test/org/apache/solr/cloud/cdcr/CdcrRequestHandlerTest.java
+@@ -39,7 +39,7 @@ public class CdcrRequestHandlerTest extends BaseCdcrDistributedZkTest {
+   @ShardsFixed(num = 2)
+   public void testLifeCycleActions() throws Exception {
+     // check initial status
+-    this.assertState(SOURCE_COLLECTION, CdcrParams.ProcessState.STOPPED, CdcrParams.BufferState.ENABLED);
++    this.assertState(SOURCE_COLLECTION, CdcrParams.ProcessState.STOPPED, CdcrParams.BufferState.DISABLED);
+ 
+     // send start action to first shard
+     NamedList rsp = invokeCdcrAction(shardToLeaderJetty.get(SOURCE_COLLECTION).get(SHARD1), CdcrParams.CdcrAction.START);
+@@ -47,13 +47,13 @@ public class CdcrRequestHandlerTest extends BaseCdcrDistributedZkTest {
+     assertEquals(CdcrParams.ProcessState.STARTED.toLower(), status.get(CdcrParams.ProcessState.getParam()));
+ 
+     // check status
+-    this.assertState(SOURCE_COLLECTION, CdcrParams.ProcessState.STARTED, CdcrParams.BufferState.ENABLED);
++    this.assertState(SOURCE_COLLECTION, CdcrParams.ProcessState.STARTED, CdcrParams.BufferState.DISABLED);
+ 
+     // Restart the leader of shard 1
+     this.restartServer(shardToLeaderJetty.get(SOURCE_COLLECTION).get(SHARD1));
+ 
+     // check status - the node that died should have picked up the original state
+-    this.assertState(SOURCE_COLLECTION, CdcrParams.ProcessState.STARTED, CdcrParams.BufferState.ENABLED);
++    this.assertState(SOURCE_COLLECTION, CdcrParams.ProcessState.STARTED, CdcrParams.BufferState.DISABLED);
+ 
+     // send stop action to second shard
+     rsp = invokeCdcrAction(shardToLeaderJetty.get(SOURCE_COLLECTION).get(SHARD2), CdcrParams.CdcrAction.STOP);
+@@ -61,7 +61,7 @@ public class CdcrRequestHandlerTest extends BaseCdcrDistributedZkTest {
+     assertEquals(CdcrParams.ProcessState.STOPPED.toLower(), status.get(CdcrParams.ProcessState.getParam()));
+ 
+     // check status
+-    this.assertState(SOURCE_COLLECTION, CdcrParams.ProcessState.STOPPED, CdcrParams.BufferState.ENABLED);
++    this.assertState(SOURCE_COLLECTION, CdcrParams.ProcessState.STOPPED, CdcrParams.BufferState.DISABLED);
+   }
+ 
+   // check the checkpoint API
+@@ -133,15 +133,13 @@ public class CdcrRequestHandlerTest extends BaseCdcrDistributedZkTest {
+     checkpoint5 = (Long) invokeCdcrAction(shardToLeaderJetty.get(SOURCE_COLLECTION).get(SHARD2), CdcrParams.CdcrAction.SHARDCHECKPOINT).get(CdcrParams.CHECKPOINT);
+     assertTrue(checkpoint5 > 0); // ensure that checkpoints from deletes are in absolute form
+ 
+-
+-    // replication never started, lastProcessedVersion should be -1 for both shards
+     rsp = invokeCdcrAction(shardToLeaderJetty.get(SOURCE_COLLECTION).get(SHARD1), CdcrParams.CdcrAction.LASTPROCESSEDVERSION);
+     long lastVersion = (Long) rsp.get(CdcrParams.LAST_PROCESSED_VERSION);
+-    assertEquals(-1l, lastVersion);
++    assertNotSame(-1l, lastVersion);
+ 
+     rsp = invokeCdcrAction(shardToLeaderJetty.get(SOURCE_COLLECTION).get(SHARD2), CdcrParams.CdcrAction.LASTPROCESSEDVERSION);
+     lastVersion = (Long) rsp.get(CdcrParams.LAST_PROCESSED_VERSION);
+-    assertEquals(-1l, lastVersion);
++    assertNotSame(-1l, lastVersion);
+   }
+ 
+   // check that the buffer state is properly synchronised across nodes
+@@ -149,14 +147,6 @@ public class CdcrRequestHandlerTest extends BaseCdcrDistributedZkTest {
+   @ShardsFixed(num = 2)
+   public void testBufferActions() throws Exception {
+     // check initial status
+-    this.assertState(SOURCE_COLLECTION, CdcrParams.ProcessState.STOPPED, CdcrParams.BufferState.ENABLED);
+-
+-    // send disable buffer action to first shard
+-    NamedList rsp = invokeCdcrAction(shardToLeaderJetty.get(SOURCE_COLLECTION).get(SHARD1), CdcrParams.CdcrAction.DISABLEBUFFER);
+-    NamedList status = (NamedList) rsp.get(CdcrParams.CdcrAction.STATUS.toLower());
+-    assertEquals(CdcrParams.BufferState.DISABLED.toLower(), status.get(CdcrParams.BufferState.getParam()));
+-
+-    // check status
+     this.assertState(SOURCE_COLLECTION, CdcrParams.ProcessState.STOPPED, CdcrParams.BufferState.DISABLED);
+ 
+     // Restart the leader of shard 1
+@@ -166,8 +156,8 @@ public class CdcrRequestHandlerTest extends BaseCdcrDistributedZkTest {
+     this.assertState(SOURCE_COLLECTION, CdcrParams.ProcessState.STOPPED, CdcrParams.BufferState.DISABLED);
+ 
+     // send enable buffer action to second shard
+-    rsp = invokeCdcrAction(shardToLeaderJetty.get(SOURCE_COLLECTION).get(SHARD2), CdcrParams.CdcrAction.ENABLEBUFFER);
+-    status = (NamedList) rsp.get(CdcrParams.CdcrAction.STATUS.toLower());
++    NamedList rsp = invokeCdcrAction(shardToLeaderJetty.get(SOURCE_COLLECTION).get(SHARD2), CdcrParams.CdcrAction.ENABLEBUFFER);
++    NamedList status = (NamedList) rsp.get(CdcrParams.CdcrAction.STATUS.toLower());
+     assertEquals(CdcrParams.BufferState.ENABLED.toLower(), status.get(CdcrParams.BufferState.getParam()));
+ 
+     // check status
+diff --git a/solr/solr-ref-guide/src/cdcr-api.adoc b/solr/solr-ref-guide/src/cdcr-api.adoc
+index 05464cd067..1226352cbb 100644
+--- a/solr/solr-ref-guide/src/cdcr-api.adoc
++++ b/solr/solr-ref-guide/src/cdcr-api.adoc
+@@ -29,8 +29,6 @@ Currently, none of the CDCR API calls have parameters.
+ * `<collection>/cdcr?action=STATUS`: <<CDCR STATUS,Returns the current state>> of CDCR.
+ * `<collection>/cdcr?action=START`: <<CDCR START,Starts CDCR>> replication
+ * `<collection>/cdcr?action=STOP`: <<CDCR STOP,Stops CDCR>> replication.
+-* `<collection>/cdcr?action=ENABLEBUFFER`: <<ENABLEBUFFER,Enables the buffering>> of updates.
+-* `<collection>/cdcr?action=DISABLEBUFFER`: <<DISABLEBUFFER,Disables the buffering>> of updates.
+ 
+ *Monitoring*
+ 
+@@ -64,64 +62,6 @@ http://localhost:8983/solr/techproducts/cdcr?action=STATUS
+   },
+   "status": {
+   "process": "stopped",
+-  "buffer": "enabled"
+-  }
+-}
+-----
+-
+-=== ENABLEBUFFER
+-
+-`solr/<collection>/cdcr?action=ENABLEBUFFER`
+-
+-==== Enable Buffer Example
+-
+-*Input*
+-
+-[source,text]
+-----
+-http://localhost:8983/solr/techproducts/cdcr?action=ENABLEBUFFER
+-----
+-
+-*Output*
+-
+-[source,json]
+-----
+-{
+-  "responseHeader": {
+-  "status": 0,
+-  "QTime": 0
+-  },
+-  "status": {
+-  "process": "started",
+-  "buffer": "enabled"
+-  }
+-}
+-----
+-
+-=== DISABLEBUFFER
+-
+-`solr/<collection>/cdcr?action=DISABLEBUFFER`
+-
+-==== Disable Buffer Example
+-
+-*Input*
+-
+-[source,text]
+-----
+-http://localhost:8983/solr/techproducts/cdcr?action=DISABLEBUFFER
+-----
+-
+-*Output*
+-
+-[source,json]
+-----
+-{
+-  "responseHeader": {
+-  "status": 0,
+-  "QTime": 0
+-  },
+-  "status": {
+-  "process": "started",
+   "buffer": "disabled"
+   }
+ }
+@@ -151,7 +91,7 @@ http://localhost:8983/solr/techproducts/cdcr?action=START
+   },
+   "status": {
+   "process": "started",
+-  "buffer": "enabled"
++  "buffer": "disabled"
+   }
+ }
+ ----
+@@ -180,7 +120,7 @@ http://localhost:8983/solr/techproducts/cdcr?action=STOP
+   },
+   "status": {
+   "process": "stopped",
+-  "buffer": "enabled"
++  "buffer": "disabled"
+   }
+ }
+ ----
+diff --git a/solr/solr-ref-guide/src/cdcr-config.adoc b/solr/solr-ref-guide/src/cdcr-config.adoc
+index e7b4806f5f..1fae46fb07 100644
+--- a/solr/solr-ref-guide/src/cdcr-config.adoc
++++ b/solr/solr-ref-guide/src/cdcr-config.adoc
+@@ -255,7 +255,7 @@ TIP: If the updateLogSynchronizer element is omitted from the Source cluster, tr
+ When buffering updates, the update logs will store all the updates indefinitely. It is best to disable buffering on both the Source and Target clusters during normal operation as when buffering is enabled the Update Logs will grow without limit. Enbling buffering is intended for special maintenance periods. Buffering can be disabled at startup with a “buffer” list and the parameter “defaultState” as follows:
+ 
+ `defaultState`::
+-The state of the buffer at startup. The default is `enabled`.
++The state of the buffer at startup. The default is `disabled`.
+ 
+ [TIP]
+ .Buffering should be enabled only for maintenance windows

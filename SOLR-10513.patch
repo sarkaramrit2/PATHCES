@@ -1,0 +1,269 @@
+diff --git a/lucene/suggest/src/java/org/apache/lucene/search/spell/LuceneLevenshteinDistance.java b/lucene/suggest/src/java/org/apache/lucene/search/spell/LuceneLevenshteinDistance.java
+index 3ba0bd332b..7b0d3a978f 100644
+--- a/lucene/suggest/src/java/org/apache/lucene/search/spell/LuceneLevenshteinDistance.java
++++ b/lucene/suggest/src/java/org/apache/lucene/search/spell/LuceneLevenshteinDistance.java
+@@ -114,4 +114,11 @@ public final class LuceneLevenshteinDistance implements StringDistance {
+     }
+     return ref;
+   }
++
++  @Override
++  public boolean equals(Object obj) {
++    if (this == obj) return true;
++    if (null == obj) return false;
++    return (getClass() == obj.getClass());
++  }
+ }
+diff --git a/solr/core/src/test-files/solr/collection1/conf/solrconfig-spellcheckcomponent.xml b/solr/core/src/test-files/solr/collection1/conf/solrconfig-spellcheckcomponent.xml
+index 7760eb261e..6a6e11465d 100644
+--- a/solr/core/src/test-files/solr/collection1/conf/solrconfig-spellcheckcomponent.xml
++++ b/solr/core/src/test-files/solr/collection1/conf/solrconfig-spellcheckcomponent.xml
+@@ -123,6 +123,15 @@
+       <str name="characterEncoding">UTF-8</str>
+       <str name="spellcheckIndexDir">spellchecker3</str>
+     </lst>
++    <lst name="spellchecker">
++      <str name="classname">solr.FileBasedSpellChecker</str>
++      <str name="name">file</str>
++      <str name="sourceLocation">spellings.txt</str>
++      <str name="characterEncoding">UTF-8</str>
++      <str name="spellcheckIndexDir">spellchecker4</str>
++      <str name="distanceMeasure">org.apache.lucene.search.spell.LuceneLevenshteinDistance</str>
++      <str name="field">teststop</str>
++    </lst>
+     <!-- Comparator -->
+     <lst name="spellchecker">
+       <str name="name">freq</str>
+@@ -188,7 +197,17 @@
+       <str>spellcheck</str>
+     </arr>
+   </requestHandler>
+-  <initParams path="/spellCheckCompRH,/spellCheckCompRH1,/spellCheckWithWordbreak">
++  <requestHandler name="/spellCheckWithDirectAndFile" class="org.apache.solr.handler.component.SearchHandler">
++    <lst name="defaults">
++      <str name="spellcheck.dictionary">direct</str>
++      <str name="spellcheck.dictionary">file</str>
++      <str name="spellcheck.count">20</str>
++    </lst>
++    <arr name="last-components">
++      <str>spellcheck</str>
++    </arr>
++  </requestHandler>
++  <initParams path="/spellCheckCompRH,/spellCheckCompRH1,/spellCheckWithWordbreak,/spellCheckWithDirectAndFile">
+     <lst name="defaults">
+       <str name="df">text</str>
+     </lst>
+diff --git a/solr/core/src/test-files/solr/collection1/conf/spellings.txt b/solr/core/src/test-files/solr/collection1/conf/spellings.txt
+new file mode 100644
+index 0000000000..b48402ca9b
+--- /dev/null
++++ b/solr/core/src/test-files/solr/collection1/conf/spellings.txt
+@@ -0,0 +1 @@
++politics
+\ No newline at end of file
+diff --git a/solr/core/src/test/org/apache/solr/spelling/ConjunctionSolrSpellCheckerTest.java b/solr/core/src/test/org/apache/solr/spelling/ConjunctionSolrSpellCheckerTest.java
+index 0df837fd49..c14bf1256e 100644
+--- a/solr/core/src/test/org/apache/solr/spelling/ConjunctionSolrSpellCheckerTest.java
++++ b/solr/core/src/test/org/apache/solr/spelling/ConjunctionSolrSpellCheckerTest.java
+@@ -18,7 +18,10 @@ package org.apache.solr.spelling;
+ 
+ import java.io.IOException;
+ 
++import org.apache.lucene.analysis.Analyzer;
++import org.apache.lucene.analysis.standard.StandardAnalyzer;
+ import org.apache.lucene.search.spell.LevenshteinDistance;
++import org.apache.lucene.search.spell.LuceneLevenshteinDistance;
+ import org.apache.lucene.search.spell.NGramDistance;
+ import org.apache.lucene.search.spell.StringDistance;
+ import org.apache.lucene.util.LuceneTestCase;
+@@ -27,47 +30,119 @@ import org.apache.solr.search.SolrIndexSearcher;
+ import org.junit.Test;
+ 
+ public class ConjunctionSolrSpellCheckerTest extends LuceneTestCase {
+-  
++
+   @Test
+   public void test() throws Exception {
+     ConjunctionSolrSpellChecker cssc = new ConjunctionSolrSpellChecker();
+-    MockSolrSpellChecker levenstein1 = new MockSolrSpellChecker(new LevenshteinDistance());
+-    MockSolrSpellChecker levenstein2 = new MockSolrSpellChecker(new LevenshteinDistance());
+-    MockSolrSpellChecker ngram = new MockSolrSpellChecker(new NGramDistance());
+-    
++
++    Analyzer analyzer = new StandardAnalyzer();
++    MockSolrSpellChecker levenstein1 = new MockSolrSpellChecker(new LevenshteinDistance(), 1.0f, analyzer);
++    MockSolrSpellChecker levenstein2 = new MockSolrSpellChecker(new LevenshteinDistance(), 1.0f, analyzer);
++
+     cssc.addChecker(levenstein1);
+     cssc.addChecker(levenstein2);
++
++    try {
++      MockSolrSpellChecker ngram = new MockSolrSpellChecker(new NGramDistance(), 1.0f, analyzer);
++      cssc.addChecker(ngram);
++      fail("ConjunctionSolrSpellChecker should have thrown an exception about non-identical StringDistances.");
++    } catch (IllegalArgumentException iae) {
++      // correct behavior
++      assertEquals("All checkers need to use the same StringDistance.", iae.getMessage());
++    }
++
++    try {
++      MockSolrSpellChecker ngram = new MockSolrSpellChecker(new LevenshteinDistance(), 1.1f, analyzer);
++      cssc.addChecker(ngram);
++      fail("ConjunctionSolrSpellChecker should have thrown an exception about non-identical Accuracy.");
++    } catch (IllegalArgumentException iae) {
++      // correct behavior
++      assertEquals("All checkers need to use the same Accuracy.", iae.getMessage());
++    }
++
++    try {
++      MockSolrSpellChecker ngram = new MockSolrSpellChecker(new LevenshteinDistance(), 1.0f, new StandardAnalyzer());
++      cssc.addChecker(ngram);
++      fail("ConjunctionSolrSpellChecker should have thrown an exception about non-identical Analyzer.");
++    } catch (IllegalArgumentException iae) {
++      // correct behavior
++      assertEquals("All checkers need to use the same Analyzer.", iae.getMessage());
++    }
++
++    cssc = new ConjunctionSolrSpellChecker();
++    levenstein1 = new MockSolrSpellChecker(new LuceneLevenshteinDistance(), 1.0f, analyzer);
++    levenstein2 = new MockSolrSpellChecker(new LuceneLevenshteinDistance(), 1.0f, analyzer);
++
++    cssc.addChecker(levenstein1);
++    cssc.addChecker(levenstein2);
++
+     try {
++      MockSolrSpellChecker ngram = new MockSolrSpellChecker(new NGramDistance(), 1.0f, analyzer);
+       cssc.addChecker(ngram);
+       fail("ConjunctionSolrSpellChecker should have thrown an exception about non-identical StringDistances.");
+     } catch (IllegalArgumentException iae) {
+       // correct behavior
++      assertEquals("All checkers need to use the same StringDistance.", iae.getMessage());
++    }
++
++    try {
++      MockSolrSpellChecker ngram = new MockSolrSpellChecker(new LuceneLevenshteinDistance(), 1.1f, analyzer);
++      cssc.addChecker(ngram);
++      fail("ConjunctionSolrSpellChecker should have thrown an exception about non-identical Accuracy.");
++    } catch (IllegalArgumentException iae) {
++      // correct behavior
++      assertEquals("All checkers need to use the same Accuracy.", iae.getMessage());
++    }
++
++    try {
++      MockSolrSpellChecker ngram = new MockSolrSpellChecker(new LuceneLevenshteinDistance(), 1.0f, new StandardAnalyzer());
++      cssc.addChecker(ngram);
++      fail("ConjunctionSolrSpellChecker should have thrown an exception about non-identical Analyzer.");
++    } catch (IllegalArgumentException iae) {
++      // correct behavior
++      assertEquals("All checkers need to use the same Analyzer.", iae.getMessage());
+     }
+   }
+ 
+   static class MockSolrSpellChecker extends SolrSpellChecker {
+-    
++
+     final StringDistance sd;
+-    
+-    MockSolrSpellChecker(StringDistance sd) {
++    final Float accuracy;
++    final Analyzer queryAnalyzer;
++
++    MockSolrSpellChecker(StringDistance sd, Float accuracy, Analyzer queryAnalyzer) {
+       this.sd = sd;
++      this.accuracy = accuracy;
++      this.queryAnalyzer = queryAnalyzer;
+     }
+-    
++
+     @Override
+     protected StringDistance getStringDistance() {
+       return sd;
+     }
+-    
++
+     @Override
+-    public void reload(SolrCore core, SolrIndexSearcher searcher) throws IOException {}
+-    
++    protected float getAccuracy() {
++      return accuracy;
++    }
++
+     @Override
+-    public void build(SolrCore core, SolrIndexSearcher searcher) throws IOException {}
+-    
++    public Analyzer getQueryAnalyzer() {
++      return queryAnalyzer;
++    }
++
++    @Override
++    public void reload(SolrCore core, SolrIndexSearcher searcher) throws IOException {
++    }
++
++    @Override
++    public void build(SolrCore core, SolrIndexSearcher searcher) throws IOException {
++    }
++
+     @Override
+     public SpellingResult getSuggestions(SpellingOptions options) throws IOException {
+       return null;
+     }
+-    
++
+   }
+ }
+diff --git a/solr/core/src/test/org/apache/solr/spelling/SpellCheckCollatorTest.java b/solr/core/src/test/org/apache/solr/spelling/SpellCheckCollatorTest.java
+index 06f18fc8bd..63213fa161 100644
+--- a/solr/core/src/test/org/apache/solr/spelling/SpellCheckCollatorTest.java
++++ b/solr/core/src/test/org/apache/solr/spelling/SpellCheckCollatorTest.java
+@@ -631,5 +631,49 @@ public class SpellCheckCollatorTest extends SolrTestCaseJ4 {
+     List<?> collations = (List<?>) collationList.getAll("collation");
+     assertTrue(collations.size() == 1);
+   }
++
++  @Test
++  public void testConjuctionSpellers() throws Exception
++  {
++    SolrCore core = h.getCore();
++    SearchComponent speller = core.getSearchComponent("spellcheck");
++    assertTrue("speller is null and it shouldn't be", speller != null);
++
++    ModifiableSolrParams params = new ModifiableSolrParams();
++    params.add(SpellCheckComponent.COMPONENT_NAME, "true");
++    params.add(SpellCheckComponent.SPELLCHECK_BUILD, "true");
++    params.add(SpellCheckComponent.SPELLCHECK_COUNT, "5");
++    params.add(CommonParams.Q, "*:*");
++    params.add(CommonParams.SORT, "id asc");
++    params.add(CommonParams.QT,"/spellCheckWithDirectAndFile");
++
++    String spell_q = "politic";
++    params.add(SpellCheckComponent.SPELLCHECK_Q, spell_q);
++    SolrQueryRequest req1 = req(params);
++    assertQ(req1, "//lst[@name='spellcheck']/lst[@name='suggestions']/lst[@name='" + spell_q + "']/int[@name='numFound']=2");
++    // 'political' coming from DirectSolrSpellChecker
++    assertQ(req1, "//lst[@name='spellcheck']/lst[@name='suggestions']/lst[@name='" + spell_q + "']/arr[@name='suggestion']/str[1][.='political']");
++    // 'politics' coming from FileBasedSpellChecker
++    assertQ(req1, "//lst[@name='spellcheck']/lst[@name='suggestions']/lst[@name='" + spell_q + "']/arr[@name='suggestion']/str[2][.='politics']");
++    req1.close();
++
++    spell_q = "politics";
++    params.set(SpellCheckComponent.SPELLCHECK_Q, spell_q);
++    SolrQueryRequest req2 = req(params);
++    // spell q matched with words in FileBasedSpellChecker
++    assertQ(req2, "//lst[@name='spellcheck']/lst[@name='suggestions']/lst[@name='" + spell_q + "']/int[@name='numFound']=1");
++    // 'political' coming from DirectSolrSpellChecker
++    assertQ(req2, "//lst[@name='spellcheck']/lst[@name='suggestions']/lst[@name='" + spell_q + "']/arr[@name='suggestion']/str[1][.='political']");
++    req2.close();
++
++    spell_q = "political";
++    params.set(SpellCheckComponent.SPELLCHECK_Q, spell_q);
++    SolrQueryRequest req3 = req(params);
++    // spell q matched with words in DirectSolrSpellChecker
++    assertQ(req3, "//lst[@name='spellcheck']/lst[@name='suggestions']/lst[@name='" + spell_q + "']/int[@name='numFound']=1");
++    // 'politics' coming from FileBasedSpellChecker
++    assertQ(req3, "//lst[@name='spellcheck']/lst[@name='suggestions']/lst[@name='" + spell_q + "']/arr[@name='suggestion']/str[1][.='politics']");
++    req3.close();
++  }
+   
+-}
++}
+\ No newline at end of file
